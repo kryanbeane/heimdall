@@ -1,0 +1,12 @@
+apiVersion: meta.heimdall.wiki/v1
+kind: Pod
+metadata:
+  labels:
+    app.kubernetes.io/name: pod
+    app.kubernetes.io/instance: pod-sample
+    app.kubernetes.io/part-of: heimdall
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: heimdall
+  name: pod-sample
+spec:
+  # TODO(user): Add fields here
