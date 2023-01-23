@@ -88,10 +88,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controllers.PodReconciler{
+	labelSelector := metav1.LabelSelector{
+		MatchLabels: map[string]string{"heimdall": "watching"},
+	}
+
+	if err = (&controllers.Controller{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+	}).Add(mgr, labelSelector); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pod")
 		os.Exit(1)
 	}
