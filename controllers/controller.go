@@ -47,10 +47,17 @@ func (ec Controller) Add(mgr manager.Manager, requiredLabel string) error {
 
 	unstructuredItems, err := DiscoverGroupResourceVersions(context.TODO(), dynClient, dynInterface, requiredLabel)
 	if err != nil {
+		logrus.Errorf("error discovering group resource versions: %v", err)
 		return err
 	}
 
 	for _, item := range unstructuredItems {
+		logrus.Info("here")
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &item)
+		if err != nil {
+			logrus.Errorf("error converting unstructured to object: %v", err)
+			return err
+		}
 
 	}
 	//// Create label selector containing the specified label
@@ -109,7 +116,7 @@ func DiscoverGroupResourceVersions(ctx context.Context, dc *discovery.DiscoveryC
 		resources, err := dc.ServerResourcesForGroupVersion(apiList.GroupVersion)
 		if err != nil {
 			logrus.Errorf("error getting resources for group version: %v", err)
-			return nil, err
+			continue
 		}
 
 		for _, res := range resources.APIResources {
@@ -118,11 +125,13 @@ func DiscoverGroupResourceVersions(ctx context.Context, dc *discovery.DiscoveryC
 				resource = res.Name
 			}
 
-			items, err = GetResourcesByJq(di, ctx, group, version, resource, requiredLabelQuery)
+			jqItems, err := GetResourcesByJq(di, ctx, group, version, resource, requiredLabelQuery)
 			if err != nil {
-				logrus.Errorf("error getting resources by jq: %v", err)
+				continue
 			}
+			items = append(items, jqItems...)
 		}
+		return items, nil
 	}
 	return items, nil
 }
