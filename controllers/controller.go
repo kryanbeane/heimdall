@@ -2,10 +2,10 @@ package controllers
 
 import (
 	"context"
+	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	u "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
@@ -13,11 +13,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 	"strings"
 )
 
@@ -29,65 +26,78 @@ type Controller struct {
 var _ reconcile.Reconciler = &Controller{}
 
 // Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
-func (ec Controller) Add(mgr manager.Manager, selector metav1.LabelSelector) error {
+func (ec Controller) Add(mgr manager.Manager, requiredLabel string) error {
 	// Create a new Controller
-	c, err := controller.New("event-controller", mgr,
+	_, err := controller.New("heimdall", mgr,
 		controller.Options{Reconciler: &Controller{
 			Client: mgr.GetClient(),
 			Scheme: mgr.GetScheme(),
 		}})
 	if err != nil {
-		logrus.Errorf("failed to create pod controller: %v", err)
+		logrus.Errorf("failed to create heimdall controller: %v", err)
 		return err
 	}
 
-	dc, err := discovery.NewDiscoveryClientForConfig(ctrl.GetConfigOrDie())
+	dynClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 	if err != nil {
 		panic(err)
 	}
 
-	// Create label selector containing the specified label
-	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(selector)
+	dynInterface, err := dynamic.NewForConfig(mgr.GetConfig())
+
+	unstructuredItems, err := DiscoverGroupResourceVersions(context.TODO(), dynClient, dynInterface, requiredLabel)
 	if err != nil {
-		logrus.Errorf("error creating label selector predicate: %v", err)
 		return err
 	}
 
-	// TODO: Get all Kinds like ou can with kubectl, and then loop through and watch each with label selector
+	for _, item := range unstructuredItems {
 
-	// Add a watch to objects containing that label
-	err = c.Watch(
-		&source.Kind{Type: &v1.Pod{}}, &handler.EnqueueRequestForObject{}, labelSelectorPredicate)
-	if err != nil {
-		logrus.Errorf("Error creating watch for objects: %v", err)
-		return err
 	}
+	//// Create label selector containing the specified label
+	//labelSelectorPredicate, err := predicate.LabelSelectorPredicate(selector)
+	//if err != nil {
+	//	logrus.Errorf("error creating label selector predicate: %v", err)
+	//	return err
+	//}
+
+	//// Add a watch to objects containing that label
+	//err = c.Watch(
+	//	&source.Kind{Type: &v1.Pod{}}, &handler.EnqueueRequestForObject{})
+	//if err != nil {
+	//	logrus.Errorf("error creating watch for objects: %v", err)
+	//	return err
+	//}
 
 	return nil
 }
 
-func GetResourcesDynamically(dc dynamic.Interface, ctx context.Context, gvr schema.GroupVersionResource) ([]unstructured.Unstructured, error) {
-	list, err := dc.Resource(gvr).List(ctx, metav1.ListOptions{})
+func GetResourcesDynamically(dynamic dynamic.Interface, ctx context.Context, group string, version string, resource string) ([]u.Unstructured, error) {
+	resourceId := schema.GroupVersionResource{
+		Group:    group,
+		Version:  version,
+		Resource: resource,
+	}
+	list, err := dynamic.Resource(resourceId).List(ctx, metav1.ListOptions{})
+
 	if err != nil {
+		logrus.Errorf("error listing resources dynamically: %v", err)
 		return nil, err
 	}
 
 	return list.Items, nil
 }
 
-func DiscoverArbitraryResources(dc discovery.DiscoveryClient) (ctrl.Result, error) {
-
+func DiscoverGroupResourceVersions(ctx context.Context, dc *discovery.DiscoveryClient, di dynamic.Interface, requiredLabelQuery string) ([]u.Unstructured, error) {
 	// Get a list of all groups in the cluster
 	_, resourceList, err := dc.ServerGroupsAndResources()
 	if err != nil {
 		panic(err)
 	}
 
-	var grvs []schema.GroupVersionResource
 	var group, version, resource string
+	var items []u.Unstructured
 
 	for _, apiList := range resourceList {
-
 		if !strings.Contains(apiList.GroupVersion, "/") {
 			group = ""
 			version = apiList.GroupVersion
@@ -96,23 +106,25 @@ func DiscoverArbitraryResources(dc discovery.DiscoveryClient) (ctrl.Result, erro
 			version = strings.Split(apiList.GroupVersion, "/")[1]
 		}
 
-		for _, res := range apiList.APIResources {
+		resources, err := dc.ServerResourcesForGroupVersion(apiList.GroupVersion)
+		if err != nil {
+			logrus.Errorf("error getting resources for group version: %v", err)
+			return nil, err
+		}
+
+		for _, res := range resources.APIResources {
 			// Exclude sub-resources
 			if !strings.Contains(res.Name, "/") {
 				resource = res.Name
 			}
 
-			gvr := schema.GroupVersionResource{
-				Resource: resource,
-				Group:    group,
-				Version:  version,
+			items, err = GetResourcesByJq(di, ctx, group, version, resource, requiredLabelQuery)
+			if err != nil {
+				logrus.Errorf("error getting resources by jq: %v", err)
 			}
-			grvs = append(grvs, gvr)
-			logrus.Infof("GRV: %v", gvr.Resource)
-
 		}
 	}
-
+	return items, nil
 }
 
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
@@ -121,28 +133,15 @@ func DiscoverArbitraryResources(dc discovery.DiscoveryClient) (ctrl.Result, erro
 
 func (ec Controller) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
 	logrus.Infof("Reconciling pod %v", req.NamespacedName)
-	//grvs = append(grvs)
-	//// logrus.Infof("APIVersion: %s, Kind: %s, Group Version: %s", g.APIVersion, g.Kind, g.GroupVersion)
-	//for _, r := range g.APIResources {
-	//	logrus.Infof("APIVersion: %s, Kind: %s, Group Version: %s, Resource: %s", g.APIVersion, g.Kind, g.GroupVersion, r.Name)
+
+	//dc, err := discovery.NewDiscoveryClientForConfig(ctrl.GetConfigOrDie())
+	//if err != nil {
+	//	panic(err)
 	//}
 
-	//dc, err := dynamic.NewForConfig(ctrl.GetConfigOrDie())
+	//grvs, err := DiscoverArbitraryResources(dc)
 	//if err != nil {
 	//	return ctrl.Result{}, err
-	//}
-	//
-	//resources, err := dc.Resource(schema.GroupVersionResource{
-	//	Group:    "v1",
-	//	Version:  "",
-	//	Resource: "",
-	//}).List(ctx, metav1.ListOptions{})
-	//if err != nil {
-	//	return ctrl.Result{}, err
-	//}
-
-	//for _, resource := range resources.Items {
-	//	logrus.Info("test", resource)
 	//}
 
 	//pod := &corev1.Pod{}
@@ -179,4 +178,53 @@ func (ec Controller) Reconcile(ctx context.Context, req reconcile.Request) (ctrl
 	//slack.SendEvent(pod, slackSecret)
 
 	return ctrl.Result{}, nil
+}
+
+func GetResourcesByJq(dynamic dynamic.Interface, ctx context.Context, group string, version string, resource string, jq string) ([]u.Unstructured, error) {
+	resources := make([]u.Unstructured, 0)
+
+	query, err := gojq.Parse(jq)
+	if err != nil {
+		logrus.Errorf("error parsing jq query: %v", err)
+		return nil, err
+	}
+
+	items, err := GetResourcesDynamically(dynamic, ctx, group, version, resource)
+	if err != nil {
+		logrus.Errorf("error getting resources dynamically with jq: %v", err)
+		return nil, err
+	}
+
+	for _, item := range items {
+		// Convert object to raw JSON
+		var rawJson interface{}
+		err = runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &rawJson)
+		if err != nil {
+			logrus.Errorf("error converting object to raw JSON: %v", err)
+			return nil, err
+		}
+
+		// Evaluate jq against JSON
+		iter := query.Run(rawJson)
+		for {
+			result, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if err, ok := result.(error); ok {
+				if err != nil {
+					logrus.Errorf("error evaluating jq: %v", err)
+					return nil, err
+				}
+			} else {
+				boolResult, ok := result.(bool)
+				if !ok {
+					logrus.Errorf("error converting jq result to bool: %v", err)
+				} else if boolResult {
+					resources = append(resources, item)
+				}
+			}
+		}
+	}
+	return resources, nil
 }

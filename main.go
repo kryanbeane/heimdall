@@ -88,15 +88,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	labelSelector := metav1.LabelSelector{
-		MatchLabels: map[string]string{"heimdall": "watching"},
-	}
+	// TODO: Need to change this later so that the priority level is configurable (Low, Medium, High)
+	requiredLabelQuery := ".metadata.labels[\"app.heimdall.io/watching\"] == \"priority-level\""
 
 	if err = (&controllers.Controller{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).Add(mgr, labelSelector); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Pod")
+	}).Add(mgr, requiredLabelQuery); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Heimdall")
 		os.Exit(1)
 	}
 	//+kubebuilder:scaffold:builder
