@@ -2,23 +2,19 @@ package controllers
 
 import (
 	"context"
-	"fmt"
 	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	u "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 	"strings"
+	"time"
 )
 
 type Controller struct {
@@ -26,84 +22,72 @@ type Controller struct {
 	*runtime.Scheme
 }
 
-var _ reconcile.Reconciler = &Controller{}
-
 // Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 func (ec Controller) Add(mgr manager.Manager, requiredLabel string) error {
-	// Create a new Controller
-	c, err := controller.New("heimdall", mgr,
-		controller.Options{Reconciler: &Controller{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
-		}})
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 	if err != nil {
-		logrus.Errorf("failed to create heimdall controller: %v", err)
 		return err
 	}
 
-	dynClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	dynamicClient, err := dynamic.NewForConfig(mgr.GetConfig())
 	if err != nil {
-		panic(err)
-	}
-
-	dynInterface, err := dynamic.NewForConfig(mgr.GetConfig())
-
-	unstructuredItems, err := DiscoverGroupResourceVersions(context.TODO(), dynClient, dynInterface, requiredLabel)
-	if err != nil {
-		logrus.Errorf("error discovering group resource versions: %v", err)
 		return err
 	}
 
-	for _, item := range unstructuredItems {
-		_, containsLabel := item.Object["metadata"].(map[string]interface{})["labels"].(map[string]interface{})["app.heimdall.io/watching"]
-		if containsLabel {
-			typedObject, err := GetGoTypeFromGVK(item.GetObjectKind().GroupVersionKind(), mgr.GetScheme())
-			if err != nil {
-				return err
-			}
+	if err := WatchResources(discoveryClient, dynamicClient, requiredLabel); err != nil {
+		return err
+	}
 
-			err = c.Watch(
-				&source.Kind{Type: typedObject}, &handler.EnqueueRequestForObject{})
-			if err != nil {
-				logrus.Errorf("error creating watch for objects: %v", err)
-				return err
-			}
+	return nil
+}
 
-			//gvr := GroupVersionResourceFromUnstructured(&item)
-			//
-			//if _, ok := watches[gvr]; ok {
-			//	//already have a watch set up for this resource
-			//	continue
-			//}
-			//
-			//wi, err := dynInterface.Resource(gvr).Watch(context.TODO(), metav1.ListOptions{})
-			//if err != nil {
-			//	logrus.Errorf("error watching resource: %v", err)
-			//}
-			//
-			//go func() {
-			//	for {
-			//		select {
-			//		case event, ok := <-wi.ResultChan():
-			//			if !ok {
-			//				delete(watches, gvr)
-			//				return
-			//			}
-			//			rawObj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(event.Object)
-			//			if err != nil {
-			//				logrus.Errorf("error converting to unstructured: %v", err)
-			//			}
-			//
-			//			logrus.Infof("got object event: %v", rawObj["metadata"].(map[string]interface{})["name"])
-			//		}
-			//	}
-			//}()
-			//// add our watch to the map, so we don't add any new ones
-			//watches[gvr] = wi
-			//continue
+func WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
+	go func() {
+		ticker := time.NewTicker(time.Second * 100)
+
+		for {
+			select {
+			case <-ticker.C:
+				unstructuredItems, err := DiscoverClusterResources(context.TODO(), discoveryClient, dynamicClient, requiredLabel)
+				if err != nil {
+					logrus.Errorf("error retrieving all resources: %v", err)
+					return
+				}
+
+				for _, item := range unstructuredItems {
+					i := item
+					go func() {
+						watcher, err := dynamicClient.Resource(GroupVersionResourceFromUnstructured(&i)).Watch(context.TODO(), metav1.ListOptions{LabelSelector: "app.heimdall.io/watching=priority-level"})
+						if err != nil {
+							return
+						}
+
+						logrus.Infof("Watching Events on Resource: %s", i.GetName())
+
+						for {
+							event, ok := <-watcher.ResultChan()
+							if !ok {
+								return
+							}
+
+							if event.Type == watch.Modified {
+								unstructuredObj, ok := event.Object.(*u.Unstructured)
+								if !ok {
+									logrus.Error("error converting object to *unstructured.Unstructured")
+									continue
+								}
+
+								if unstructuredObj.GetName() == i.GetName() {
+									logrus.Infof("Resource %s has been modified", i.GetName())
+									// TODO: Process the event
+								}
+							}
+						}
+					}()
+				}
+			}
 		}
-	}
-
+	}()
 	return nil
 }
 
@@ -115,9 +99,7 @@ func GetResourcesDynamically(dynamic dynamic.Interface, ctx context.Context, gro
 	}
 
 	list, err := dynamic.Resource(resourceId).Namespace("").List(ctx, metav1.ListOptions{})
-
 	if err != nil {
-		logrus.Errorf("error listing resources dynamically: %v", err)
 		return nil, err
 	}
 
@@ -129,86 +111,49 @@ func GroupVersionResourceFromUnstructured(o *u.Unstructured) schema.GroupVersion
 	return schema.GroupVersionResource{Group: o.GetObjectKind().GroupVersionKind().Group, Version: o.GetObjectKind().GroupVersionKind().Version, Resource: resource}
 }
 
-//func (ec Controller) GetGoType(obj *u.Unstructured) (runtime.Object, error) {
-//	gvk := obj.GetObjectKind().GroupVersionKind()
-//	gv := schema.GroupVersion{Group: gvk.Group, Version: gvk.Version}
-//	object, err := ec.Scheme.New(gv.WithKind(gvk.Kind))
-//	if err != nil {
-//		return nil, err
-//	}
-//	return object, nil
-//}
+func DiscoverClusterResources(ctx context.Context, dc *discovery.DiscoveryClient, di dynamic.Interface, requiredLabelQuery string) ([]u.Unstructured, error) {
+	var g, v, r string
+	var items []u.Unstructured
 
-func GetGoTypeFromGVK(groupVersion schema.GroupVersionKind, scheme *runtime.Scheme) (client.Object, error) {
-	// Create a new instance of the desired type
-	obj, err := scheme.New(groupVersion)
-	if obj == nil || err != nil {
-		return nil, fmt.Errorf("failed to create a new instance of type %s", groupVersion.String())
-	}
-
-	// Cast the object to a client.Object
-	clientObj, ok := obj.(client.Object)
-	if !ok {
-		return nil, fmt.Errorf("failed to cast object to client.Object")
-	}
-
-	return clientObj, nil
-}
-
-func DiscoverGroupResourceVersions(ctx context.Context, dc *discovery.DiscoveryClient, di dynamic.Interface, requiredLabelQuery string) ([]u.Unstructured, error) {
-	// Get a list of all groups in the cluster
-	_, resourceList, err := dc.ServerGroupsAndResources()
+	// Get all server groups found in the cluster
+	apiGroupList, err := dc.ServerGroups()
 	if err != nil {
 		panic(err)
 	}
 
-	var group, version, resource string
-	var items []u.Unstructured
+	// Loop through all groups found, so apps, events.k8s.io, apiregistration.k8s.io, etc... (and custom groups - like heimdall.k8s.io)
+	for _, apiGroup := range apiGroupList.Groups {
 
-	for _, apiList := range resourceList {
-		// Determine the group and version
-		if !strings.Contains(apiList.GroupVersion, "/") {
-			group = ""
-			version = apiList.GroupVersion
-		} else {
-			group = strings.Split(apiList.GroupVersion, "/")[0]
-			version = strings.Split(apiList.GroupVersion, "/")[1]
-		}
+		// Loop through all versions found in each group, so v1, v1beta1, etc...
+		for _, version := range apiGroup.Versions {
 
-		// Get a list of all resources in the group/version
-		resources, err := dc.ServerResourcesForGroupVersion(apiList.GroupVersion)
-		if err != nil {
-			logrus.Errorf("error getting resources for group version: %v", err)
-			continue
-		}
-
-		// Iterate through each resource in the group/version
-		for _, res := range resources.APIResources {
-			// Exclude sub-resources
-			if !strings.Contains(res.Name, "/") {
-				resource = res.Name
-			}
-
-			// Get a list of all objects in the group/version/resource in json with the label
-			jqItems, err := GetResourcesByJq(di, ctx, group, version, resource, requiredLabelQuery)
+			// Get a list of all server resources for each group version found in the cluster
+			groupVersion, err := dc.ServerResourcesForGroupVersion(version.GroupVersion)
 			if err != nil {
-				continue
+				return nil, err
 			}
-			items = append(items, jqItems...)
+
+			// Loop through all resources found in each group version
+			for _, resource := range groupVersion.APIResources {
+				g = apiGroup.Name
+				v = version.Version
+
+				if !strings.Contains(resource.Name, "/") {
+					r = resource.Name
+
+					// Get a list of all objects in the group/version/resource in json with the label
+					jqItems, err := GetResourcesByJq(di, ctx, g, v, r, requiredLabelQuery)
+					if err != nil {
+						continue
+					}
+
+					items = append(items, jqItems...)
+				}
+			}
 		}
-		return items, nil
 	}
 
 	return items, nil
-}
-
-//+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=core,resources=pods/finalizers,verbs=update
-
-func (ec Controller) Reconcile(ctx context.Context, req reconcile.Request) (ctrl.Result, error) {
-
-	return ctrl.Result{}, nil
 }
 
 func GetResourcesByJq(dynamic dynamic.Interface, ctx context.Context, group string, version string, resource string, labelQuery string) ([]u.Unstructured, error) {
@@ -222,11 +167,11 @@ func GetResourcesByJq(dynamic dynamic.Interface, ctx context.Context, group stri
 
 	items, err := GetResourcesDynamically(dynamic, ctx, group, version, resource)
 	if err != nil {
-		logrus.Errorf("error getting resources dynamically with jq: %v", err)
 		return nil, err
 	}
 
 	for _, item := range items {
+
 		// Convert object to raw JSON
 		var rawJson interface{}
 		err = runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &rawJson)
