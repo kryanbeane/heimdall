@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	pluralize "github.com/gertd/go-pluralize"
 	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -62,7 +63,7 @@ func WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dy
 							return
 						}
 
-						logrus.Infof("Watching Events on Resource: %s", i.GetName())
+						logrus.Infof("Watching Events on Resource: %s of type: %s", i.GetName(), i.GetObjectKind().GroupVersionKind().Kind)
 
 						for {
 							event, ok := <-watcher.ResultChan()
@@ -107,7 +108,7 @@ func GetResourcesDynamically(dynamic dynamic.Interface, ctx context.Context, gro
 }
 
 func GroupVersionResourceFromUnstructured(o *u.Unstructured) schema.GroupVersionResource {
-	resource := strings.ToLower(o.GetObjectKind().GroupVersionKind().Kind + "s")
+	resource := strings.ToLower(pluralize.NewClient().Plural(o.GetObjectKind().GroupVersionKind().Kind))
 	return schema.GroupVersionResource{Group: o.GetObjectKind().GroupVersionKind().Group, Version: o.GetObjectKind().GroupVersionKind().Version, Resource: resource}
 }
 
