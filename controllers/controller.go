@@ -2,18 +2,22 @@ package controllers
 
 import (
 	"context"
-	pluralize "github.com/gertd/go-pluralize"
+	"github.com/gertd/go-pluralize"
 	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	u "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 	"strings"
 	"time"
 )
@@ -21,10 +25,38 @@ import (
 type Controller struct {
 	client.Client
 	*runtime.Scheme
+	resources map[string]u.Unstructured
+}
+
+func (c Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+	logrus.Infof("Reconciling %s", request.NamespacedName)
+
+	object := c.resources[request.NamespacedName.String()]
+
+	// Check if resource still has label and if not delete it from the map
+	value, labelExists := object.GetLabels()["app.heimdall.io/watching"]
+	if !labelExists || value == "" {
+		delete(c.resources, request.NamespacedName.String())
+	}
+
+	return reconcile.Result{}, nil
 }
 
 // Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
-func (ec Controller) Add(mgr manager.Manager, requiredLabel string) error {
+func (c Controller) Add(mgr manager.Manager, requiredLabel string) error {
+	ctrlr, err := controller.New("controller", mgr,
+		controller.Options{Reconciler: &Controller{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}})
+	if err != nil {
+		logrus.Errorf("failed to create controller: %v", err)
+		return err
+	}
+
+	// Initialize map of resources
+	c.resources = make(map[string]u.Unstructured)
+
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 	if err != nil {
 		return err
@@ -35,20 +67,28 @@ func (ec Controller) Add(mgr manager.Manager, requiredLabel string) error {
 		return err
 	}
 
-	if err := WatchResources(discoveryClient, dynamicClient, requiredLabel); err != nil {
+	if err := c.WatchResources(ctrlr, discoveryClient, dynamicClient, requiredLabel); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
+func (c Controller) WatchResources(controller controller.Controller, discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
+	// Create label selector containing the specified label
+	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{MatchLabels: map[string]string{"app.heimdall.io/watching": "priority-level"}})
+	if err != nil {
+		logrus.Errorf("Error creating label selector predicate: %v", err)
+		return err
+	}
+
 	go func() {
 		ticker := time.NewTicker(time.Second * 100)
 
 		for {
 			select {
 			case <-ticker.C:
+
 				unstructuredItems, err := DiscoverClusterResources(context.TODO(), discoveryClient, dynamicClient, requiredLabel)
 				if err != nil {
 					logrus.Errorf("error retrieving all resources: %v", err)
@@ -56,36 +96,55 @@ func WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dy
 				}
 
 				for _, item := range unstructuredItems {
-					i := item
+					item := item
 					go func() {
-						watcher, err := dynamicClient.Resource(GroupVersionResourceFromUnstructured(&i)).Watch(context.TODO(), metav1.ListOptions{LabelSelector: "app.heimdall.io/watching=priority-level"})
+
+						if _, ok := c.resources[item.GetNamespace()+"/"+item.GetName()]; !ok {
+							c.resources[item.GetName()+item.GetNamespace()] = item
+						}
+
+						err = controller.Watch(
+							&source.Kind{Type: &item},
+							&handler.EnqueueRequestForObject{},
+							labelSelectorPredicate)
 						if err != nil {
 							return
 						}
-
-						logrus.Infof("Watching Events on Resource: %s of type: %s", i.GetName(), i.GetObjectKind().GroupVersionKind().Kind)
-
-						for {
-							event, ok := <-watcher.ResultChan()
-							if !ok {
-								return
-							}
-
-							if event.Type == watch.Modified {
-								unstructuredObj, ok := event.Object.(*u.Unstructured)
-								if !ok {
-									logrus.Error("error converting object to *unstructured.Unstructured")
-									continue
-								}
-
-								if unstructuredObj.GetName() == i.GetName() {
-									logrus.Infof("Resource %s has been modified", i.GetName())
-									// TODO: Process the event
-								}
-							}
-						}
 					}()
+
 				}
+
+				//for _, item := range unstructuredItems {
+				//	i := item
+				//	go func() {
+				//		watcher, err := dynamicClient.Resource(GroupVersionResourceFromUnstructured(&i)).Watch(context.TODO(), metav1.ListOptions{LabelSelector: "app.heimdall.io/watching=priority-level"})
+				//		if err != nil {
+				//			return
+				//		}
+				//
+				//		logrus.Infof("Watching Events on Resource: %s of type: %s", i.GetName(), i.GetObjectKind().GroupVersionKind().Kind)
+				//
+				//		for {
+				//			event, ok := <-watcher.ResultChan()
+				//			if !ok {
+				//				return
+				//			}
+				//
+				//			if event.Type == watch.Modified {
+				//				unstructuredObj, ok := event.Object.(*u.Unstructured)
+				//				if !ok {
+				//					logrus.Error("error converting object to *unstructured.Unstructured")
+				//					continue
+				//				}
+				//
+				//				if unstructuredObj.GetName() == i.GetName() {
+				//					logrus.Infof("Resource %s has been modified", i.GetName())
+				//					// TODO: Process the event
+				//				}
+				//			}
+				//		}
+				//	}()
+				//}
 			}
 		}
 	}()
