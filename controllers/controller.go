@@ -4,6 +4,8 @@ import (
 	"context"
 	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	u "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,19 +29,25 @@ type Controller struct {
 	resources map[string]u.Unstructured
 }
 
-func (c Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
-	logrus.Infof("Reconciling %s", request.NamespacedName)
+const (
+	configMapName      = "heimdall-settings"
+	configMapNamespace = "heimdall-controller"
+)
 
-	resource := c.resources[request.NamespacedName.String()]
-
-	// Check if resource still has label and if not delete it from the map
-	value, labelExists := resource.GetLabels()["app.heimdall.io/watching"]
-	if !labelExists || value == "" {
-		delete(c.resources, request.NamespacedName.String())
+var (
+	defaultConfigMap = v1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      configMapName,
+			Namespace: configMapNamespace,
+		},
+		Data: map[string]string{
+			"slack-channel":           "your-channel",
+			"low-priority-cadence":    "600",
+			"medium-priority-cadence": "300",
+			"high-priority-cadence":   "60",
+		},
 	}
-
-	return reconcile.Result{}, nil
-}
+)
 
 // InitializeController Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 func (c Controller) InitializeController(mgr manager.Manager, requiredLabel string) error {
@@ -71,6 +79,37 @@ func (c Controller) InitializeController(mgr manager.Manager, requiredLabel stri
 	}
 
 	return nil
+}
+
+func (c Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+	logrus.Infof("Reconciling %s", request.NamespacedName)
+
+	resource := c.resources[request.NamespacedName.String()]
+
+	// Check if resource still has label and if not delete it from the map
+	value, labelExists := resource.GetLabels()["app.heimdall.io/watching"]
+	if !labelExists || value == "" {
+		delete(c.resources, request.NamespacedName.String())
+	}
+
+	return reconcile.Result{}, nil
+}
+
+func (c Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, error) {
+	var cm v1.ConfigMap
+
+	if err := c.Get(ctx, client.ObjectKeyFromObject(&defaultConfigMap), &cm); err != nil {
+		if errors.IsNotFound(err) {
+			if err := c.Create(ctx, &defaultConfigMap); err != nil {
+				return v1.ConfigMap{}, err
+			}
+			// Successful creation
+			return defaultConfigMap, nil
+		}
+		return v1.ConfigMap{}, err
+	}
+
+	return cm, nil
 }
 
 func (c Controller) WatchResources(controller controller.Controller, discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
