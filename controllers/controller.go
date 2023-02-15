@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"context"
-	"github.com/gertd/go-pluralize"
 	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,10 +30,10 @@ type Controller struct {
 func (c Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	logrus.Infof("Reconciling %s", request.NamespacedName)
 
-	object := c.resources[request.NamespacedName.String()]
+	resource := c.resources[request.NamespacedName.String()]
 
 	// Check if resource still has label and if not delete it from the map
-	value, labelExists := object.GetLabels()["app.heimdall.io/watching"]
+	value, labelExists := resource.GetLabels()["app.heimdall.io/watching"]
 	if !labelExists || value == "" {
 		delete(c.resources, request.NamespacedName.String())
 	}
@@ -42,8 +41,8 @@ func (c Controller) Reconcile(ctx context.Context, request reconcile.Request) (r
 	return reconcile.Result{}, nil
 }
 
-// Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
-func (c Controller) Add(mgr manager.Manager, requiredLabel string) error {
+// InitializeController Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
+func (c Controller) InitializeController(mgr manager.Manager, requiredLabel string) error {
 	ctrlr, err := controller.New("controller", mgr,
 		controller.Options{Reconciler: &Controller{
 			Client: mgr.GetClient(),
@@ -54,7 +53,7 @@ func (c Controller) Add(mgr manager.Manager, requiredLabel string) error {
 		return err
 	}
 
-	// Initialize map of resources
+	// Initialize resources map
 	c.resources = make(map[string]u.Unstructured)
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
@@ -78,7 +77,6 @@ func (c Controller) WatchResources(controller controller.Controller, discoveryCl
 	// Create label selector containing the specified label
 	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{MatchLabels: map[string]string{"app.heimdall.io/watching": "priority-level"}})
 	if err != nil {
-		logrus.Errorf("Error creating label selector predicate: %v", err)
 		return err
 	}
 
@@ -89,9 +87,9 @@ func (c Controller) WatchResources(controller controller.Controller, discoveryCl
 			select {
 			case <-ticker.C:
 
-				unstructuredItems, err := DiscoverClusterResources(context.TODO(), discoveryClient, dynamicClient, requiredLabel)
+				unstructuredItems, err := DiscoverClusterGRVs(context.TODO(), discoveryClient, dynamicClient, requiredLabel)
 				if err != nil {
-					logrus.Errorf("error retrieving all resources: %v", err)
+					logrus.Errorf("error discovering cluster resources: %v", err)
 					return
 				}
 
@@ -151,7 +149,7 @@ func (c Controller) WatchResources(controller controller.Controller, discoveryCl
 	return nil
 }
 
-func GetResourcesDynamically(dynamic dynamic.Interface, ctx context.Context, group string, version string, resource string) ([]u.Unstructured, error) {
+func GetUnstructuredResourceList(dynamic dynamic.Interface, ctx context.Context, group string, version string, resource string) ([]u.Unstructured, error) {
 	resourceId := schema.GroupVersionResource{
 		Group:    group,
 		Version:  version,
@@ -166,12 +164,7 @@ func GetResourcesDynamically(dynamic dynamic.Interface, ctx context.Context, gro
 	return list.Items, nil
 }
 
-func GroupVersionResourceFromUnstructured(o *u.Unstructured) schema.GroupVersionResource {
-	resource := strings.ToLower(pluralize.NewClient().Plural(o.GetObjectKind().GroupVersionKind().Kind))
-	return schema.GroupVersionResource{Group: o.GetObjectKind().GroupVersionKind().Group, Version: o.GetObjectKind().GroupVersionKind().Version, Resource: resource}
-}
-
-func DiscoverClusterResources(ctx context.Context, dc *discovery.DiscoveryClient, di dynamic.Interface, requiredLabelQuery string) ([]u.Unstructured, error) {
+func DiscoverClusterGRVs(ctx context.Context, dc *discovery.DiscoveryClient, di dynamic.Interface, requiredLabelQuery string) ([]u.Unstructured, error) {
 	var g, v, r string
 	var items []u.Unstructured
 
@@ -225,7 +218,7 @@ func GetResourcesByJq(dynamic dynamic.Interface, ctx context.Context, group stri
 		return nil, err
 	}
 
-	items, err := GetResourcesDynamically(dynamic, ctx, group, version, resource)
+	items, err := GetUnstructuredResourceList(dynamic, ctx, group, version, resource)
 	if err != nil {
 		return nil, err
 	}

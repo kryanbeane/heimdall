@@ -94,7 +94,7 @@ func main() {
 	if err = (&controllers.Controller{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).Add(mgr, requiredLabelQuery); err != nil {
+	}).InitializeController(mgr, requiredLabelQuery); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Heimdall")
 		os.Exit(1)
 	}
