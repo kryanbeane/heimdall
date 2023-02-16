@@ -5,6 +5,7 @@ import (
 	"github.com/slack-go/slack"
 	slackclient "github.com/slack-go/slack"
 	corev1 "k8s.io/api/core/v1"
+	u "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 type Notification struct {
@@ -12,9 +13,9 @@ type Notification struct {
 }
 
 // SendEvent SendMessage sends a message using all current senders
-func SendEvent(pod *corev1.Pod, secret *corev1.Secret) {
-	token := secret.Data["token"]
-	channel := secret.Data["channel"]
+func SendEvent(u u.Unstructured, secret corev1.Secret, configMap corev1.ConfigMap) {
+	token := secret.Data["slack-token"]
+	channel := configMap.Data["slack-channel"]
 	logrus.Infof("Sending event to slack channel %s", channel)
 	logrus.Infof("Sending event to slack token %s", token)
 
@@ -22,13 +23,7 @@ func SendEvent(pod *corev1.Pod, secret *corev1.Secret) {
 	attachment := slackclient.Attachment{
 		Fields: []slackclient.AttachmentField{
 			{
-				Title: "Object Kind: " + pod.Kind,
-			},
-			{
-				Title: "Object Name: " + pod.Name,
-			},
-			{
-				Title: "Namespace: " + pod.Namespace,
+				Title: "Object Name: " + u.GetName(),
 			},
 			{
 				Title: "Oh no! Please monitor your resource!",
@@ -38,7 +33,7 @@ func SendEvent(pod *corev1.Pod, secret *corev1.Secret) {
 
 	// Send message to Slack
 	channelID, timestamp, err := api.PostMessage(
-		string(channel),
+		channel,
 		slack.MsgOptionAttachments(attachment),
 		slackclient.MsgOptionAsUser(true),
 	)

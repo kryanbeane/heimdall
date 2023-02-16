@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"github.com/gertd/go-pluralize"
+	"github.com/heimdall-controller/heimdall/pkg/slack"
 	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
@@ -32,21 +33,32 @@ type Controller struct {
 }
 
 const (
-	configMapName      = "heimdall-settings"
-	configMapNamespace = "heimdall-controller"
-	watchingLabel      = "app.heimdall.io/watching"
+	configMapName = "heimdall-settings"
+	namespace     = "heimdall-controller"
+	watchingLabel = "app.heimdall.io/watching"
+	secretName    = "heimdall-secret"
 )
 
-var defaultConfigMap = v1.ConfigMap{
+var configMap = v1.ConfigMap{
 	ObjectMeta: metav1.ObjectMeta{
 		Name:      configMapName,
-		Namespace: configMapNamespace,
+		Namespace: namespace,
 	},
 	Data: map[string]string{
 		"slack-channel":           "your-channel",
 		"low-priority-cadence":    "600",
 		"medium-priority-cadence": "300",
 		"high-priority-cadence":   "60",
+	},
+}
+
+var secret = v1.Secret{
+	ObjectMeta: metav1.ObjectMeta{
+		Name:      secretName,
+		Namespace: namespace,
+	},
+	Data: map[string][]byte{
+		"slack-token": []byte("your-token"),
 	},
 }
 
@@ -83,6 +95,11 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 }
 
 func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+
+	//TODO Remember that this reconcile is triggered on every event happening to the object
+	// Eventually Heimdall will need to track when the last notification was sent but for now
+	// We can just send them on every event
+
 	resource, ok := c.RetrieveResourceFromMap(request.NamespacedName.String())
 	if !ok {
 		logrus.Errorf("failed to retrieve resource from map: %v", request.NamespacedName.String())
@@ -122,12 +139,17 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		logrus.Infof("successfully updated resource: %s", resource.GetName())
 	}
 
-	cm, err := c.ReconcileConfigMap(ctx)
+	configMap, err := c.ReconcileConfigMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
 
-	logrus.Infof("reconciled config map: %s", cm.Name)
+	secret, err = c.ReconcileSecret(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	slack.SendEvent(resource, secret, configMap)
 
 	return reconcile.Result{}, nil
 }
@@ -147,19 +169,37 @@ func GVRFromUnstructured(o u.Unstructured) schema.GroupVersionResource {
 func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, error) {
 	var cm v1.ConfigMap
 
-	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&defaultConfigMap), &cm); err != nil {
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&configMap), &cm); err != nil {
 		if errors.IsNotFound(err) {
-			if err := c.Client.Create(ctx, &defaultConfigMap); err != nil {
+			if err := c.Client.Create(ctx, &configMap); err != nil {
 				return v1.ConfigMap{}, err
 			}
 			// Successful creation
-			return defaultConfigMap, nil
+			return configMap, nil
 		}
 		return v1.ConfigMap{}, err
 	}
 
 	// Successfully retrieved configmap
 	return cm, nil
+}
+
+func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
+	var s v1.Secret
+
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&secret), &s); err != nil {
+		if errors.IsNotFound(err) {
+			if err := c.Client.Create(ctx, &secret); err != nil {
+				return v1.Secret{}, err
+			}
+			// Successful creation
+			return secret, nil
+		}
+		return v1.Secret{}, err
+	}
+
+	// Successfully retrieved configmap
+	return s, nil
 }
 
 func (c *Controller) WatchResources(controller controller.Controller, discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
@@ -178,7 +218,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 100)
+		ticker := time.NewTicker(time.Second * 5)
 
 		for {
 			select {

@@ -253,3 +253,9 @@ catalog-build: opm ## Build a catalog image.
 .PHONY: catalog-push
 catalog-push: ## Push a catalog image.
 	$(MAKE) docker-push IMG=$(CATALOG_IMG)
+
+.PHONY: secret
+secret:
+	@echo -n '$(param)' | base64 > secret.txt
+	@sed 's/PLACEHOLDER/`cat secret.txt`/g' template/secret.yaml > secret_final.yaml
+	@rm secret.txt
