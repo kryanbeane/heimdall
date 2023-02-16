@@ -13,9 +13,9 @@ type Notification struct {
 }
 
 // SendEvent SendMessage sends a message using all current senders
-func SendEvent(u u.Unstructured, secret *corev1.Secret) {
-	token := secret.Data["token"]
-	channel := secret.Data["channel"]
+func SendEvent(u u.Unstructured, secret corev1.Secret, configMap corev1.ConfigMap) {
+	token := secret.Data["slack-token"]
+	channel := configMap.Data["slack-channel"]
 	logrus.Infof("Sending event to slack channel %s", channel)
 	logrus.Infof("Sending event to slack token %s", token)
 
@@ -23,13 +23,7 @@ func SendEvent(u u.Unstructured, secret *corev1.Secret) {
 	attachment := slackclient.Attachment{
 		Fields: []slackclient.AttachmentField{
 			{
-				Title: "Object Kind: " + u.GetKind(),
-			},
-			{
 				Title: "Object Name: " + u.GetName(),
-			},
-			{
-				Title: "Namespace: " + u.GetNamespace(),
 			},
 			{
 				Title: "Oh no! Please monitor your resource!",
@@ -39,7 +33,7 @@ func SendEvent(u u.Unstructured, secret *corev1.Secret) {
 
 	// Send message to Slack
 	channelID, timestamp, err := api.PostMessage(
-		string(channel),
+		channel,
 		slack.MsgOptionAttachments(attachment),
 		slackclient.MsgOptionAsUser(true),
 	)

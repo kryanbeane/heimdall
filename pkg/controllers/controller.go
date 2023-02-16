@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"github.com/gertd/go-pluralize"
+	"github.com/heimdall-controller/heimdall/pkg/slack"
 	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
@@ -138,7 +139,7 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		logrus.Infof("successfully updated resource: %s", resource.GetName())
 	}
 
-	_, err := c.ReconcileConfigMap(ctx)
+	configMap, err := c.ReconcileConfigMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -147,6 +148,8 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+
+	slack.SendEvent(resource, secret, configMap)
 
 	return reconcile.Result{}, nil
 }
