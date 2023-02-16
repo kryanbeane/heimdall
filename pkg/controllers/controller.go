@@ -92,8 +92,7 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	logrus.Infof("reconciling %s with importance of %s", request.NamespacedName, resource.GetLabels()[watchingLabel])
 
 	// If resource no longer has the label or if label is empty (no priority set) then delete it from the map
-	value, labelExists := resource.GetLabels()[watchingLabel]
-	if !labelExists || value == "" {
+	if value, labelExists := resource.GetLabels()[watchingLabel]; !labelExists || value == "" {
 		resources.Delete(request.NamespacedName.String())
 		return reconcile.Result{}, nil
 	}
@@ -107,11 +106,10 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		gvr := GVRFromUnstructured(resource)
 
 		if obj, err := c.DynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Get(ctx, resource.GetName(), metav1.GetOptions{}); err == nil {
-
 			labels := obj.GetLabels()
 			labels[watchingLabel] = "low"
 			obj.SetLabels(labels)
-			logrus.Infof("updating resource labels: %s", resource.GetName())
+			logrus.Infof("updating label for resource: %s", resource.GetName())
 
 			if _, err := c.DynamicClient.Resource(gvr).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
 				return reconcile.Result{}, err
@@ -124,10 +122,12 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		logrus.Infof("successfully updated resource: %s", resource.GetName())
 	}
 
-	_, err := c.ReconcileConfigMap(ctx)
+	cm, err := c.ReconcileConfigMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+
+	logrus.Infof("reconciled config map: %s", cm.Name)
 
 	return reconcile.Result{}, nil
 }
@@ -178,7 +178,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 1)
+		ticker := time.NewTicker(time.Second * 100)
 
 		for {
 			select {
