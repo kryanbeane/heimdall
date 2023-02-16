@@ -87,10 +87,18 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 
 	logrus.Infof("reconciling %s with importance of %s", request.NamespacedName, resource.GetLabels()["app.heimdall.io/watching"])
 
-	// Check if resource still has label and if not delete it from the map
+	// If resource no longer has the label or if label is empty (no priority set) then delete it from the map
 	value, labelExists := resource.GetLabels()["app.heimdall.io/watching"]
 	if !labelExists || value == "" {
 		resources.Delete(request.NamespacedName.String())
+		return reconcile.Result{}, nil
+	}
+
+	// Set priority level based on label - if invalid priority, default to low
+	priority := strings.ToLower(resource.GetLabels()["app.heimdall.io/watching"])
+	if priority != "low" && priority != "medium" && priority != "high" {
+		logrus.Errorf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, resource.GetName())
+		resource.GetLabels()["app.heimdall.io/watching"] = "low"
 	}
 
 	_, err := c.ReconcileConfigMap(ctx)
@@ -122,7 +130,7 @@ func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, erro
 		}
 		return v1.ConfigMap{}, err
 	}
-
+	// Successfully retrieved configmap
 	return cm, nil
 }
 
@@ -134,7 +142,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 100)
+		ticker := time.NewTicker(time.Second * 5)
 
 		for {
 			select {
