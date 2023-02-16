@@ -18,13 +18,13 @@ package main
 
 import (
 	"flag"
+	"github.com/heimdall-controller/heimdall/pkg/controllers"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
-	"github.com/heimdall-controller/heimdall/controllers"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -89,12 +89,12 @@ func main() {
 	}
 
 	// TODO: Need to change this later so that the priority level is configurable (Low, Medium, High)
-	requiredLabelQuery := ".metadata.labels[\"app.heimdall.io/watching\"] == \"priority-level\""
+	requiredLabelQuery := ".metadata.labels | has(\"app.heimdall.io/watching\")"
 
 	if err = (&controllers.Controller{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
-	}).Add(mgr, requiredLabelQuery); err != nil {
+	}).InitializeController(mgr, requiredLabelQuery); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Heimdall")
 		os.Exit(1)
 	}
