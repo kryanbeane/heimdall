@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"github.com/gertd/go-pluralize"
 	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
@@ -25,13 +26,15 @@ import (
 )
 
 type Controller struct {
-	Client client.Client
-	Scheme *runtime.Scheme
+	Client        client.Client
+	Scheme        *runtime.Scheme
+	DynamicClient dynamic.Interface
 }
 
 const (
 	configMapName      = "heimdall-settings"
 	configMapNamespace = "heimdall-controller"
+	watchingLabel      = "app.heimdall.io/watching"
 )
 
 var defaultConfigMap = v1.ConfigMap{
@@ -51,10 +54,16 @@ var resources = sync.Map{}
 
 // InitializeController Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel string) error {
+	dynamicClient, err := dynamic.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return err
+	}
+
 	ctrlr, err := controller.New("controller", mgr,
 		controller.Options{Reconciler: &Controller{
-			Client: mgr.GetClient(),
-			Scheme: mgr.GetScheme(),
+			Client:        mgr.GetClient(),
+			Scheme:        mgr.GetScheme(),
+			DynamicClient: dynamicClient,
 		}})
 	if err != nil {
 		logrus.Errorf("failed to create controller: %v", err)
@@ -62,11 +71,6 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 	}
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
-	if err != nil {
-		return err
-	}
-
-	dynamicClient, err := dynamic.NewForConfig(mgr.GetConfig())
 	if err != nil {
 		return err
 	}
@@ -85,20 +89,39 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{}, nil
 	}
 
-	logrus.Infof("reconciling %s with importance of %s", request.NamespacedName, resource.GetLabels()["app.heimdall.io/watching"])
+	logrus.Infof("reconciling %s with importance of %s", request.NamespacedName, resource.GetLabels()[watchingLabel])
 
 	// If resource no longer has the label or if label is empty (no priority set) then delete it from the map
-	value, labelExists := resource.GetLabels()["app.heimdall.io/watching"]
+	value, labelExists := resource.GetLabels()[watchingLabel]
 	if !labelExists || value == "" {
 		resources.Delete(request.NamespacedName.String())
 		return reconcile.Result{}, nil
 	}
 
 	// Set priority level based on label - if invalid priority, default to low
-	priority := strings.ToLower(resource.GetLabels()["app.heimdall.io/watching"])
+	priority := strings.ToLower(resource.GetLabels()[watchingLabel])
 	if priority != "low" && priority != "medium" && priority != "high" {
 		logrus.Errorf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, resource.GetName())
-		resource.GetLabels()["app.heimdall.io/watching"] = "low"
+		resource.GetLabels()[watchingLabel] = "low"
+
+		gvr := GVRFromUnstructured(resource)
+
+		if obj, err := c.DynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Get(ctx, resource.GetName(), metav1.GetOptions{}); err == nil {
+
+			labels := obj.GetLabels()
+			labels[watchingLabel] = "low"
+			obj.SetLabels(labels)
+			logrus.Infof("updating resource labels: %s", resource.GetName())
+
+			if _, err := c.DynamicClient.Resource(gvr).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
+				return reconcile.Result{}, err
+			}
+			resource = *obj
+		} else {
+			return reconcile.Result{}, err
+		}
+
+		logrus.Infof("successfully updated resource: %s", resource.GetName())
 	}
 
 	_, err := c.ReconcileConfigMap(ctx)
@@ -116,6 +139,10 @@ func (c *Controller) RetrieveResourceFromMap(key string) (u.Unstructured, bool) 
 		return res.(u.Unstructured), true
 	}
 }
+func GVRFromUnstructured(o u.Unstructured) schema.GroupVersionResource {
+	resource := strings.ToLower(pluralize.NewClient().Plural(o.GetObjectKind().GroupVersionKind().Kind))
+	return schema.GroupVersionResource{Group: o.GetObjectKind().GroupVersionKind().Group, Version: o.GetObjectKind().GroupVersionKind().Version, Resource: resource}
+}
 
 func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, error) {
 	var cm v1.ConfigMap
@@ -130,19 +157,28 @@ func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, erro
 		}
 		return v1.ConfigMap{}, err
 	}
+
 	// Successfully retrieved configmap
 	return cm, nil
 }
 
 func (c *Controller) WatchResources(controller controller.Controller, discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
-	// Create label selector containing the specified label
-	labelSelectorPredicate, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{MatchLabels: map[string]string{"app.heimdall.io/watching": "priority-level"}})
+
+	// Create label selector containing the specified label key with no value (LabelSelectorOpExists checks that key exists)
+	pred, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
+		MatchExpressions: []metav1.LabelSelectorRequirement{
+			{
+				Key:      watchingLabel,
+				Operator: metav1.LabelSelectorOpExists,
+			},
+		},
+	})
 	if err != nil {
 		return err
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 5)
+		ticker := time.NewTicker(time.Second * 1)
 
 		for {
 			select {
@@ -164,7 +200,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 						err = controller.Watch(
 							&source.Kind{Type: &item},
 							&handler.EnqueueRequestForObject{},
-							labelSelectorPredicate)
+							pred)
 						if err != nil {
 							return
 						}
