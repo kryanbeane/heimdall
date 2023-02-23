@@ -63,6 +63,7 @@ var secret = v1.Secret{
 }
 
 var resources = sync.Map{}
+var lastNotificationTimes = sync.Map{}
 
 // InitializeController Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel string) error {
@@ -154,13 +155,14 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	return reconcile.Result{}, nil
 }
 
-func (c *Controller) RetrieveResourceFromMap(key string) (u.Unstructured, bool) {
-	if res, ok := resources.Load(key); !ok {
+func (c *Controller) RetrieveResourceFromMap(key string, m *sync.Map) (u.Unstructured, bool) {
+	if res, ok := m.Load(key); !ok {
 		return u.Unstructured{}, false
 	} else {
 		return res.(u.Unstructured), true
 	}
 }
+
 func GVRFromUnstructured(o u.Unstructured) schema.GroupVersionResource {
 	resource := strings.ToLower(pluralize.NewClient().Plural(o.GetObjectKind().GroupVersionKind().Kind))
 	return schema.GroupVersionResource{Group: o.GetObjectKind().GroupVersionKind().Group, Version: o.GetObjectKind().GroupVersionKind().Version, Resource: resource}
@@ -233,8 +235,13 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 				for _, item := range unstructuredItems {
 					item := item
 					go func() {
-						if _, ok := c.RetrieveResourceFromMap(item.GetNamespace() + item.GetName()); !ok {
+						// Add the unstructured item to the resources map
+						if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
 							resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
+						}
+						// Add the last notification time to the notification map
+						if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &lastNotificationTimes); !ok {
+							lastNotificationTimes.Store(item.GetNamespace()+"/"+item.GetName(), time.Now().Add(time.Duration(-1000)*time.Hour))
 						}
 
 						err = controller.Watch(
