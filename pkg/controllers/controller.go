@@ -46,9 +46,9 @@ var configMap = v1.ConfigMap{
 	},
 	Data: map[string]string{
 		"slack-channel":           "your-channel",
-		"low-priority-cadence":    "600",
-		"medium-priority-cadence": "300",
-		"high-priority-cadence":   "60",
+		"low-priority-cadence":    "600s",
+		"medium-priority-cadence": "300s",
+		"high-priority-cadence":   "60s",
 	},
 }
 
@@ -101,10 +101,16 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	// Eventually Heimdall will need to track when the last notification was sent but for now
 	// We can just send them on every event
 
-	resource, ok := c.RetrieveResourceFromMap(request.NamespacedName.String())
+	resourceRef, ok := c.RetrieveResourceFromMap(request.NamespacedName.String(), &resources)
 	if !ok {
 		logrus.Errorf("failed to retrieve resource from map: %v", request.NamespacedName.String())
 		return reconcile.Result{}, nil
+	}
+
+	gvr := GVRFromUnstructured(resourceRef)
+	resource, err := c.DynamicClient.Resource(gvr).Namespace(resourceRef.GetNamespace()).Get(ctx, resourceRef.GetName(), metav1.GetOptions{})
+	if err != nil {
+		return reconcile.Result{}, err
 	}
 
 	logrus.Infof("reconciling %s with importance of %s", request.NamespacedName, resource.GetLabels()[watchingLabel])
@@ -118,26 +124,17 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	// Set priority level based on label - if invalid priority, default to low
 	priority := strings.ToLower(resource.GetLabels()[watchingLabel])
 	if priority != "low" && priority != "medium" && priority != "high" {
-		logrus.Errorf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, resource.GetName())
+		logrus.Warnf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, resource.GetName())
 		resource.GetLabels()[watchingLabel] = "low"
 
-		gvr := GVRFromUnstructured(resource)
+		labels := resource.GetLabels()
+		labels[watchingLabel] = "low"
+		resource.SetLabels(labels)
+		priority = "low"
 
-		if obj, err := c.DynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Get(ctx, resource.GetName(), metav1.GetOptions{}); err == nil {
-			labels := obj.GetLabels()
-			labels[watchingLabel] = "low"
-			obj.SetLabels(labels)
-			logrus.Infof("updating label for resource: %s", resource.GetName())
-
-			if _, err := c.DynamicClient.Resource(gvr).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
-				return reconcile.Result{}, err
-			}
-			resource = *obj
-		} else {
+		if _, err := c.DynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Update(ctx, resource, metav1.UpdateOptions{}); err != nil {
 			return reconcile.Result{}, err
 		}
-
-		logrus.Infof("successfully updated resource: %s", resource.GetName())
 	}
 
 	configMap, err := c.ReconcileConfigMap(ctx)
@@ -150,7 +147,52 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{}, err
 	}
 
-	slack.SendEvent(resource, secret, configMap)
+	if priority == "high" {
+		if highCadence, err := time.ParseDuration(configMap.Data["high-priority-cadence"]); err == nil {
+
+			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
+				if !lastNotificationTime.(time.Time).Add(highCadence).Before(time.Now()) {
+					logrus.Warn("HERUEAHRLI:HJDIUAWDA")
+					return reconcile.Result{}, nil
+				}
+			}
+			slack.SendEvent(*resource, secret, configMap)
+		} else {
+			return reconcile.Result{}, err
+		}
+
+	} else if priority == "medium" {
+		if mediumCadence, err := time.ParseDuration(configMap.Data["medium-priority-cadence"]); err == nil {
+
+			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
+				if !lastNotificationTime.(time.Time).Add(mediumCadence).Before(time.Now()) {
+					logrus.Warn("HERUEAHRLI:HJDIUAWDA")
+					return reconcile.Result{}, nil
+				}
+			}
+			slack.SendEvent(*resource, secret, configMap)
+		} else {
+			return reconcile.Result{}, err
+		}
+
+	} else if priority == "low" {
+		logrus.Infof("low priority resource: %s, with cadence: %s", resource.GetName(), configMap.Data["low-priority-cadence"])
+		if mediumCadence, err := time.ParseDuration(configMap.Data["medium-priority-cadence"]); err == nil {
+
+			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
+				if !lastNotificationTime.(time.Time).Add(mediumCadence).Before(time.Now()) {
+					logrus.Warn("HERUEAHRLI:HJDIUAWDA")
+					return reconcile.Result{}, nil
+				}
+			}
+			slack.SendEvent(*resource, secret, configMap)
+		} else {
+			return reconcile.Result{}, err
+		}
+	} else {
+		logrus.Errorf("heimdall failed to correct invalid priority level: %s, for the resource: %s", priority, resource.GetName())
+		return reconcile.Result{}, nil
+	}
 
 	return reconcile.Result{}, nil
 }
