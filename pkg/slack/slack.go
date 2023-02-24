@@ -16,8 +16,6 @@ type Notification struct {
 func SendEvent(u u.Unstructured, secret corev1.Secret, configMap corev1.ConfigMap) {
 	token := secret.Data["slack-token"]
 	channel := configMap.Data["slack-channel"]
-	logrus.Infof("Sending event to slack channel %s", channel)
-	logrus.Infof("Sending event to slack token %s", token)
 
 	api := slackclient.New(string(token))
 	attachment := slackclient.Attachment{
@@ -32,7 +30,7 @@ func SendEvent(u u.Unstructured, secret corev1.Secret, configMap corev1.ConfigMa
 	}
 
 	// Send message to Slack
-	channelID, timestamp, err := api.PostMessage(
+	channelID, _, err := api.PostMessage(
 		channel,
 		slack.MsgOptionAttachments(attachment),
 		slackclient.MsgOptionAsUser(true),
@@ -40,6 +38,6 @@ func SendEvent(u u.Unstructured, secret corev1.Secret, configMap corev1.ConfigMa
 	if err != nil {
 		logrus.Errorf("error sending message: %v", err)
 	} else {
-		logrus.Infof("Message successfully sent to channel %s at %s", channelID, timestamp)
+		logrus.Infof("Message successfully sent to channel %s", channelID)
 	}
 }

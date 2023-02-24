@@ -152,7 +152,7 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 
 			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
 				if !lastNotificationTime.(time.Time).Add(highCadence).Before(time.Now()) {
-					logrus.Warn("HERUEAHRLI:HJDIUAWDA")
+					logrus.Warn("HERUEAHRLaaaaaaaaaaaaaaaaaa")
 					return reconcile.Result{}, nil
 				}
 			}
@@ -176,16 +176,21 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		}
 
 	} else if priority == "low" {
-		logrus.Infof("low priority resource: %s, with cadence: %s", resource.GetName(), configMap.Data["low-priority-cadence"])
-		if mediumCadence, err := time.ParseDuration(configMap.Data["medium-priority-cadence"]); err == nil {
 
-			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
-				if !lastNotificationTime.(time.Time).Add(mediumCadence).Before(time.Now()) {
-					logrus.Warn("HERUEAHRLI:HJDIUAWDA")
+		if lowCadence, err := time.ParseDuration(configMap.Data["low-priority-cadence"]); err == nil {
+
+			if lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); loaded {
+				if !lastNotificationTime.(time.Time).Add(lowCadence).Before(time.Now()) {
+					logrus.Warnf("Event occurred on resource: %s, with a %s priority (%v), but has not been sent because it has not been %s since the last notification", resource.GetName(), priority, lastNotificationTime.(time.Time), lowCadence.String())
 					return reconcile.Result{}, nil
+				} else {
+					slack.SendEvent(*resource, secret, configMap)
+					lastNotificationTimes.Store(request.NamespacedName.String(), time.Now())
 				}
+			} else {
+				slack.SendEvent(*resource, secret, configMap)
+				lastNotificationTimes.Store(request.NamespacedName.String(), time.Now())
 			}
-			slack.SendEvent(*resource, secret, configMap)
 		} else {
 			return reconcile.Result{}, err
 		}
@@ -262,7 +267,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 5)
+		ticker := time.NewTicker(time.Second * 100)
 
 		for {
 			select {
@@ -280,10 +285,6 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 						// Add the unstructured item to the resources map
 						if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
 							resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
-						}
-						// Add the last notification time to the notification map
-						if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &lastNotificationTimes); !ok {
-							lastNotificationTimes.Store(item.GetNamespace()+"/"+item.GetName(), time.Now().Add(time.Duration(-1000)*time.Hour))
 						}
 
 						err = controller.Watch(
