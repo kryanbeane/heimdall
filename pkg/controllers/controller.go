@@ -46,9 +46,9 @@ var configMap = v1.ConfigMap{
 	},
 	Data: map[string]string{
 		"slack-channel":           "your-channel",
-		"low-priority-cadence":    "600",
-		"medium-priority-cadence": "300",
-		"high-priority-cadence":   "60",
+		"low-priority-cadence":    "600s",
+		"medium-priority-cadence": "300s",
+		"high-priority-cadence":   "60s",
 	},
 }
 
@@ -63,6 +63,7 @@ var secret = v1.Secret{
 }
 
 var resources = sync.Map{}
+var lastNotificationTimes = sync.Map{}
 
 // InitializeController Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel string) error {
@@ -100,10 +101,16 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	// Eventually Heimdall will need to track when the last notification was sent but for now
 	// We can just send them on every event
 
-	resource, ok := c.RetrieveResourceFromMap(request.NamespacedName.String())
+	resourceRef, ok := c.RetrieveResourceFromMap(request.NamespacedName.String(), &resources)
 	if !ok {
 		logrus.Errorf("failed to retrieve resource from map: %v", request.NamespacedName.String())
 		return reconcile.Result{}, nil
+	}
+
+	gvr := GVRFromUnstructured(resourceRef)
+	resource, err := c.DynamicClient.Resource(gvr).Namespace(resourceRef.GetNamespace()).Get(ctx, resourceRef.GetName(), metav1.GetOptions{})
+	if err != nil {
+		return reconcile.Result{}, err
 	}
 
 	logrus.Infof("reconciling %s with importance of %s", request.NamespacedName, resource.GetLabels()[watchingLabel])
@@ -117,26 +124,17 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	// Set priority level based on label - if invalid priority, default to low
 	priority := strings.ToLower(resource.GetLabels()[watchingLabel])
 	if priority != "low" && priority != "medium" && priority != "high" {
-		logrus.Errorf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, resource.GetName())
+		logrus.Warnf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, resource.GetName())
 		resource.GetLabels()[watchingLabel] = "low"
 
-		gvr := GVRFromUnstructured(resource)
+		labels := resource.GetLabels()
+		labels[watchingLabel] = "low"
+		resource.SetLabels(labels)
+		priority = "low"
 
-		if obj, err := c.DynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Get(ctx, resource.GetName(), metav1.GetOptions{}); err == nil {
-			labels := obj.GetLabels()
-			labels[watchingLabel] = "low"
-			obj.SetLabels(labels)
-			logrus.Infof("updating label for resource: %s", resource.GetName())
-
-			if _, err := c.DynamicClient.Resource(gvr).Namespace(obj.GetNamespace()).Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
-				return reconcile.Result{}, err
-			}
-			resource = *obj
-		} else {
+		if _, err := c.DynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Update(ctx, resource, metav1.UpdateOptions{}); err != nil {
 			return reconcile.Result{}, err
 		}
-
-		logrus.Infof("successfully updated resource: %s", resource.GetName())
 	}
 
 	configMap, err := c.ReconcileConfigMap(ctx)
@@ -149,18 +147,69 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{}, err
 	}
 
-	slack.SendEvent(resource, secret, configMap)
+	if priority == "high" {
+		if highCadence, err := time.ParseDuration(configMap.Data["high-priority-cadence"]); err == nil {
+
+			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
+				if !lastNotificationTime.(time.Time).Add(highCadence).Before(time.Now()) {
+					logrus.Warn("HERUEAHRLaaaaaaaaaaaaaaaaaa")
+					return reconcile.Result{}, nil
+				}
+			}
+			slack.SendEvent(*resource, secret, configMap)
+		} else {
+			return reconcile.Result{}, err
+		}
+
+	} else if priority == "medium" {
+		if mediumCadence, err := time.ParseDuration(configMap.Data["medium-priority-cadence"]); err == nil {
+
+			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
+				if !lastNotificationTime.(time.Time).Add(mediumCadence).Before(time.Now()) {
+					logrus.Warn("HERUEAHRLI:HJDIUAWDA")
+					return reconcile.Result{}, nil
+				}
+			}
+			slack.SendEvent(*resource, secret, configMap)
+		} else {
+			return reconcile.Result{}, err
+		}
+
+	} else if priority == "low" {
+
+		if lowCadence, err := time.ParseDuration(configMap.Data["low-priority-cadence"]); err == nil {
+
+			if lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); loaded {
+				if !lastNotificationTime.(time.Time).Add(lowCadence).Before(time.Now()) {
+					logrus.Warnf("Event occurred on resource: %s, with a %s priority (%v), but has not been sent because it has not been %s since the last notification", resource.GetName(), priority, lastNotificationTime.(time.Time), lowCadence.String())
+					return reconcile.Result{}, nil
+				} else {
+					slack.SendEvent(*resource, secret, configMap)
+					lastNotificationTimes.Store(request.NamespacedName.String(), time.Now())
+				}
+			} else {
+				slack.SendEvent(*resource, secret, configMap)
+				lastNotificationTimes.Store(request.NamespacedName.String(), time.Now())
+			}
+		} else {
+			return reconcile.Result{}, err
+		}
+	} else {
+		logrus.Errorf("heimdall failed to correct invalid priority level: %s, for the resource: %s", priority, resource.GetName())
+		return reconcile.Result{}, nil
+	}
 
 	return reconcile.Result{}, nil
 }
 
-func (c *Controller) RetrieveResourceFromMap(key string) (u.Unstructured, bool) {
-	if res, ok := resources.Load(key); !ok {
+func (c *Controller) RetrieveResourceFromMap(key string, m *sync.Map) (u.Unstructured, bool) {
+	if res, ok := m.Load(key); !ok {
 		return u.Unstructured{}, false
 	} else {
 		return res.(u.Unstructured), true
 	}
 }
+
 func GVRFromUnstructured(o u.Unstructured) schema.GroupVersionResource {
 	resource := strings.ToLower(pluralize.NewClient().Plural(o.GetObjectKind().GroupVersionKind().Kind))
 	return schema.GroupVersionResource{Group: o.GetObjectKind().GroupVersionKind().Group, Version: o.GetObjectKind().GroupVersionKind().Version, Resource: resource}
@@ -218,7 +267,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 5)
+		ticker := time.NewTicker(time.Second * 100)
 
 		for {
 			select {
@@ -233,7 +282,8 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 				for _, item := range unstructuredItems {
 					item := item
 					go func() {
-						if _, ok := c.RetrieveResourceFromMap(item.GetNamespace() + item.GetName()); !ok {
+						// Add the unstructured item to the resources map
+						if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
 							resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
 						}
 
