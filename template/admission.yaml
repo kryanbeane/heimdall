@@ -1,0 +1,20 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: heimdall-admission-controller
+webhooks:
+  - name: my.admission.controller.example.com
+    clientConfig:
+      service:
+        name: my-admission-controller
+        namespace: my-namespace
+        path: /validate
+    rules:
+      - operations: ["CREATE", "UPDATE"]
+        apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        resources: ["deployments"]
+    failurePolicy: Fail
+    admissionReviewVersions: [ "v1", "v1beta1" ]
+    sideEffects: None
+
