@@ -88,7 +88,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO: Need to change this later so that the priority level is configurable (Low, Medium, High)
 	requiredLabelQuery := ".metadata.labels | has(\"app.heimdall.io/watching\")"
 
 	if err = (&controllers.Controller{
