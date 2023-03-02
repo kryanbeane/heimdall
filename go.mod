@@ -5,13 +5,13 @@ go 1.19
 require (
 	github.com/gertd/go-pluralize v0.2.1
 	github.com/itchyny/gojq v0.12.11
-	github.com/onsi/ginkgo/v2 v2.8.3
-	github.com/onsi/gomega v1.27.1
-	github.com/sirupsen/logrus v1.8.1
+	github.com/onsi/ginkgo/v2 v2.8.4
+	github.com/onsi/gomega v1.27.2
+	github.com/sirupsen/logrus v1.9.0
 	github.com/slack-go/slack v0.12.1
-	k8s.io/api v0.26.1
-	k8s.io/apimachinery v0.26.1
-	k8s.io/client-go v0.26.1
+	k8s.io/api v0.26.2
+	k8s.io/apimachinery v0.26.2
+	k8s.io/client-go v0.26.2
 	sigs.k8s.io/controller-runtime v0.14.4
 )
 
