@@ -4,7 +4,7 @@ go 1.19
 
 require (
 	github.com/gertd/go-pluralize v0.2.1
-	github.com/itchyny/gojq v0.12.11
+	github.com/itchyny/gojq v0.12.12
 	github.com/onsi/ginkgo/v2 v2.8.4
 	github.com/onsi/gomega v1.27.2
 	github.com/sirupsen/logrus v1.9.0

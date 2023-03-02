@@ -83,8 +83,8 @@ github.com/gorilla/websocket
 # github.com/imdario/mergo v0.3.12
 ## explicit; go 1.13
 github.com/imdario/mergo
-# github.com/itchyny/gojq v0.12.11
-## explicit; go 1.17
+# github.com/itchyny/gojq v0.12.12
+## explicit; go 1.18
 github.com/itchyny/gojq
 # github.com/itchyny/timefmt-go v0.1.5
 ## explicit; go 1.17
