@@ -95,11 +95,22 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 	return nil
 }
 
+func getMapLength(m *sync.Map) int {
+	var count int
+	m.Range(func(_, _ interface{}) bool {
+		count++
+		return true
+	})
+	return count
+}
+
 func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 
 	//TODO Remember that this reconcile is triggered on every event happening to the object
 	// Eventually Heimdall will need to track when the last notification was sent but for now
 	// We can just send them on every event
+
+	watchingResourcesCount.Set(float64(getMapLength(&resources)))
 
 	resourceRef, ok := c.RetrieveResourceFromMap(request.NamespacedName.String(), &resources)
 	if !ok {
