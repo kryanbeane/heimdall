@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -106,10 +107,6 @@ func getMapLength(m *sync.Map) int {
 
 func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 
-	//TODO Remember that this reconcile is triggered on every event happening to the object
-	// Eventually Heimdall will need to track when the last notification was sent but for now
-	// We can just send them on every event
-
 	watchingResourcesCount.Set(float64(getMapLength(&resources)))
 
 	resourceRef, ok := c.RetrieveResourceFromMap(request.NamespacedName.String(), &resources)
@@ -148,7 +145,7 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		}
 	}
 
-	configMap, err := c.ReconcileConfigMap(ctx)
+	cm, err := c.ReconcileConfigMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -158,56 +155,62 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{}, err
 	}
 
-	if priority == "high" {
-		if highCadence, err := time.ParseDuration(configMap.Data["high-priority-cadence"]); err == nil {
-
-			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
-				if !lastNotificationTime.(time.Time).Add(highCadence).Before(time.Now()) {
-					return reconcile.Result{}, nil
-				}
-			}
-			slack.SendEvent(*resource, secret, configMap)
-		} else {
-			return reconcile.Result{}, err
-		}
-
-	} else if priority == "medium" {
-		if mediumCadence, err := time.ParseDuration(configMap.Data["medium-priority-cadence"]); err == nil {
-
-			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
-				if !lastNotificationTime.(time.Time).Add(mediumCadence).Before(time.Now()) {
-					return reconcile.Result{}, nil
-				}
-			}
-			slack.SendEvent(*resource, secret, configMap)
-		} else {
-			return reconcile.Result{}, err
-		}
-
-	} else if priority == "low" {
-
-		if lowCadence, err := time.ParseDuration(configMap.Data["low-priority-cadence"]); err == nil {
-
-			if lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); loaded {
-				if !lastNotificationTime.(time.Time).Add(lowCadence).Before(time.Now()) {
-					return reconcile.Result{}, nil
-				} else {
-					slack.SendEvent(*resource, secret, configMap)
-					lastNotificationTimes.Store(request.NamespacedName.String(), time.Now())
-				}
-			} else {
-				slack.SendEvent(*resource, secret, configMap)
-				lastNotificationTimes.Store(request.NamespacedName.String(), time.Now())
-			}
-		} else {
-			return reconcile.Result{}, err
-		}
-	} else {
-		logrus.Errorf("heimdall failed to correct invalid priority level: %s, for the resource: %s", priority, resource.GetName())
-		return reconcile.Result{}, nil
+	err = c.ReconcileNotificationCadence(request, resource, priority, cm, secret)
+	if err != nil {
+		return ctrl.Result{}, nil
 	}
 
 	return reconcile.Result{}, nil
+}
+
+func SendSlackNotification(name string, resource *u.Unstructured, secret v1.Secret, configMap v1.ConfigMap) error {
+	if err := slack.SendEvent(*resource, secret, configMap); err != nil {
+		return err
+	}
+	lastNotificationTimes.Store(name, time.Now())
+	return nil
+}
+
+//func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, resource *u.Unstructured, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
+//	if cadence, err := time.ParseDuration(configMap.Data[priority+"-priority-cadence"]); err == nil {
+//		if lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); loaded {
+//			if !lastNotificationTime.(time.Time).Add(cadence).Before(time.Now()) {
+//				return nil
+//			} else {
+//				if err = SendSlackNotification(request.NamespacedName.String(), resource, secret, configMap); err != nil {
+//					return err
+//				}
+//				return nil
+//			}
+//		}
+//
+//		if err = SendSlackNotification(request.NamespacedName.String(), resource, secret, configMap); err != nil {
+//			return err
+//		}
+//		return nil
+//	} else {
+//		return err
+//	}
+//}
+
+func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, resource *u.Unstructured, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
+	cadence, err := time.ParseDuration(configMap.Data[priority+"-priority-cadence"])
+	if err != nil {
+		return err
+	}
+	// Get the last notification time
+	lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now())
+	if loaded {
+		if !lastNotificationTime.(time.Time).Add(cadence).Before(time.Now()) {
+			logrus.Warnf("skipping notification for %s because the last message was sent less than %s ago", request.NamespacedName.String(), cadence.String())
+			return nil
+		}
+	}
+	// Notify
+	if err = SendSlackNotification(request.NamespacedName.String(), resource, secret, configMap); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (c *Controller) RetrieveResourceFromMap(key string, m *sync.Map) (u.Unstructured, bool) {
@@ -275,7 +278,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 100)
+		ticker := time.NewTicker(time.Second * 30)
 
 		for {
 			select {
