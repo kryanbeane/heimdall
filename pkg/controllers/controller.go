@@ -115,6 +115,9 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{}, nil
 	}
 
+	// Update the map with the latest resource version
+	c.UpdateMapWithResource(resourceRef, &resources)
+
 	gvr := GVRFromUnstructured(resourceRef)
 	resource, err := c.DynamicClient.Resource(gvr).Namespace(resourceRef.GetNamespace()).Get(ctx, resourceRef.GetName(), metav1.GetOptions{})
 	if err != nil {
@@ -171,34 +174,12 @@ func SendSlackNotification(name string, resource *u.Unstructured, secret v1.Secr
 	return nil
 }
 
-//func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, resource *u.Unstructured, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
-//	if cadence, err := time.ParseDuration(configMap.Data[priority+"-priority-cadence"]); err == nil {
-//		if lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); loaded {
-//			if !lastNotificationTime.(time.Time).Add(cadence).Before(time.Now()) {
-//				return nil
-//			} else {
-//				if err = SendSlackNotification(request.NamespacedName.String(), resource, secret, configMap); err != nil {
-//					return err
-//				}
-//				return nil
-//			}
-//		}
-//
-//		if err = SendSlackNotification(request.NamespacedName.String(), resource, secret, configMap); err != nil {
-//			return err
-//		}
-//		return nil
-//	} else {
-//		return err
-//	}
-//}
-
 func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, resource *u.Unstructured, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
 	cadence, err := time.ParseDuration(configMap.Data[priority+"-priority-cadence"])
 	if err != nil {
 		return err
 	}
-	// Get the last notification time
+
 	lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now())
 	if loaded {
 		if !lastNotificationTime.(time.Time).Add(cadence).Before(time.Now()) {
@@ -206,7 +187,7 @@ func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, res
 			return nil
 		}
 	}
-	// Notify
+
 	if err = SendSlackNotification(request.NamespacedName.String(), resource, secret, configMap); err != nil {
 		return err
 	}
@@ -219,6 +200,10 @@ func (c *Controller) RetrieveResourceFromMap(key string, m *sync.Map) (u.Unstruc
 	} else {
 		return res.(u.Unstructured), true
 	}
+}
+
+func (c *Controller) UpdateMapWithResource(resource u.Unstructured, m *sync.Map) {
+	m.Store(resource.GetNamespace()+"/"+resource.GetName(), resource)
 }
 
 func GVRFromUnstructured(o u.Unstructured) schema.GroupVersionResource {
