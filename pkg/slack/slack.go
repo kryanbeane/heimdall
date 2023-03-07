@@ -1,7 +1,6 @@
 package slack
 
 import (
-	"github.com/sirupsen/logrus"
 	"github.com/slack-go/slack"
 	slackclient "github.com/slack-go/slack"
 	corev1 "k8s.io/api/core/v1"
@@ -13,7 +12,7 @@ type Notification struct {
 }
 
 // SendEvent SendMessage sends a message using all current senders
-func SendEvent(u u.Unstructured, secret corev1.Secret, configMap corev1.ConfigMap) {
+func SendEvent(u u.Unstructured, secret corev1.Secret, configMap corev1.ConfigMap) error {
 	token := secret.Data["slack-token"]
 	channel := configMap.Data["slack-channel"]
 
@@ -30,14 +29,14 @@ func SendEvent(u u.Unstructured, secret corev1.Secret, configMap corev1.ConfigMa
 	}
 
 	// Send message to Slack
-	channelID, _, err := api.PostMessage(
+	_, _, err := api.PostMessage(
 		channel,
 		slack.MsgOptionAttachments(attachment),
 		slackclient.MsgOptionAsUser(true),
 	)
 	if err != nil {
-		logrus.Errorf("error sending message: %v", err)
+		return err
 	} else {
-		logrus.Infof("Message successfully sent to channel %s", channelID)
+		return nil
 	}
 }
