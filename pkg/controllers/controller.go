@@ -45,7 +45,7 @@ var configMap = v1.ConfigMap{
 		Namespace: namespace,
 	},
 	Data: map[string]string{
-		"slack-channel":           "your-channel",
+		"slack-channel":           "default-heimdall-channel",
 		"low-priority-cadence":    "600s",
 		"medium-priority-cadence": "300s",
 		"high-priority-cadence":   "60s",
@@ -163,7 +163,6 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 
 			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
 				if !lastNotificationTime.(time.Time).Add(highCadence).Before(time.Now()) {
-					logrus.Warn("HERUEAHRLaaaaaaaaaaaaaaaaaa")
 					return reconcile.Result{}, nil
 				}
 			}
@@ -177,7 +176,6 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 
 			if lastNotificationTime, ok := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); !ok {
 				if !lastNotificationTime.(time.Time).Add(mediumCadence).Before(time.Now()) {
-					logrus.Warn("HERUEAHRLI:HJDIUAWDA")
 					return reconcile.Result{}, nil
 				}
 			}
@@ -192,7 +190,6 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 
 			if lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now()); loaded {
 				if !lastNotificationTime.(time.Time).Add(lowCadence).Before(time.Now()) {
-					logrus.Warnf("Event occurred on resource: %s, with a %s priority (%v), but has not been sent because it has not been %s since the last notification", resource.GetName(), priority, lastNotificationTime.(time.Time), lowCadence.String())
 					return reconcile.Result{}, nil
 				} else {
 					slack.SendEvent(*resource, secret, configMap)
