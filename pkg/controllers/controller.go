@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -63,6 +64,8 @@ var secret = v1.Secret{
 	},
 }
 
+var clientset *kubernetes.Clientset
+
 var resources = sync.Map{}
 var lastNotificationTimes = sync.Map{}
 
@@ -83,6 +86,15 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		logrus.Errorf("failed to create controller: %v", err)
 		return err
 	}
+
+	// Create a Kubernetes client for low-level work
+	clientset, err = kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return err
+	}
+
+	// Fetch provider id
+	_ = slack.GetProviderId(clientset)
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 	if err != nil {
@@ -263,7 +275,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 30)
+		ticker := time.NewTicker(time.Second * 10)
 
 		for {
 			select {
