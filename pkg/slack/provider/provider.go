@@ -44,12 +44,6 @@ func BuildNotificationURL(client kubernetes.Clientset, resourceInformation gcp2.
 		logrus.Infof("Provider is AWS")
 	case provider == azure:
 		logrus.Infof("Provider is Azure")
-	case provider == digitaloceon:
-		logrus.Infof("Provider is DigitalOcean")
-	case provider == ibm:
-		logrus.Infof("Provider is IBM")
-	case provider == vmware:
-		logrus.Infof("Provider is VMware")
 	case provider == openshift:
 		logrus.Infof("Provider is OpenShift")
 	default:
