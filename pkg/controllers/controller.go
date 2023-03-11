@@ -190,7 +190,7 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	return reconcile.Result{}, nil
 }
 
-func SendSlackNotification(name string, resource *u.Unstructured, secret v1.Secret, configMap v1.ConfigMap) error {
+func sendSlackNotification(name string, resource *u.Unstructured, secret v1.Secret, configMap v1.ConfigMap) error {
 	if err := slack.SendEvent(*resource, secret, configMap); err != nil {
 		return err
 	}
@@ -212,7 +212,7 @@ func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, res
 		}
 	}
 
-	if err = SendSlackNotification(request.NamespacedName.String(), resource, secret, configMap); err != nil {
+	if err = sendSlackNotification(request.NamespacedName.String(), resource, secret, configMap); err != nil {
 		return err
 	}
 	return nil
@@ -302,52 +302,22 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 				for _, item := range unstructuredItems {
 					item := item
 					go func() {
-						// Add the unstructured item to the resources map
-						if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
-							resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
-						}
+						if item.GetName() != "" && item.GetNamespace() != "" {
+							// Add the unstructured item to the resources map
+							if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
+								resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
+							}
 
-						err = controller.Watch(
-							&source.Kind{Type: &item},
-							&handler.EnqueueRequestForObject{},
-							pred)
-						if err != nil {
-							return
+							err = controller.Watch(
+								&source.Kind{Type: &item},
+								&handler.EnqueueRequestForObject{},
+								pred)
+							if err != nil {
+								return
+							}
 						}
 					}()
 				}
-
-				//for _, item := range unstructuredItems {
-				//	i := item
-				//	go func() {
-				//		watcher, err := dynamicClient.Resource(GroupVersionResourceFromUnstructured(&i)).Watch(context.TODO(), metav1.ListOptions{LabelSelector: "app.heimdall.io/watching=priority-level"})
-				//		if err != nil {
-				//			return
-				//		}
-				//
-				//		logrus.Infof("Watching Events on Resource: %s of type: %s", i.GetName(), i.GetObjectKind().GroupVersionKind().Kind)
-				//
-				//		for {
-				//			event, ok := <-watcher.ResultChan()
-				//			if !ok {
-				//				return
-				//			}
-				//
-				//			if event.Type == watch.Modified {
-				//				unstructuredObj, ok := event.Object.(*u.Unstructured)
-				//				if !ok {
-				//					logrus.Error("error converting object to *unstructured.Unstructured")
-				//					continue
-				//				}
-				//
-				//				if unstructuredObj.GetName() == i.GetName() {
-				//					logrus.Infof("Resource %s has been modified", i.GetName())
-				//					// TODO: Process the event
-				//				}
-				//			}
-				//		}
-				//	}()
-				//}
 			}
 		}
 	}()
