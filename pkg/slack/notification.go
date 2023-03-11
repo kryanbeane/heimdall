@@ -12,29 +12,63 @@ type Notification struct {
 }
 
 // SendEvent SendMessage sends a message using all current senders
-func SendEvent(u u.Unstructured, secret corev1.Secret, configMap corev1.ConfigMap) error {
+func SendEvent(u u.Unstructured, url string, priority string, secret corev1.Secret, configMap corev1.ConfigMap) error {
 	token := secret.Data["slack-token"]
 	channel := configMap.Data["slack-channel"]
+
+	// Traffic light system for priority
+	var messageColour string
+	var emoji string
+	if priority == "high" {
+		emoji = ":large_red_circle: :large_red_circle: :large_red_circle:"
+		messageColour = "#ff1100"
+	} else if priority == "medium" {
+		emoji = ":large_orange_circle: :large_orange_circle: :large_orange_circle:"
+		messageColour = "#ff6600"
+	} else {
+		emoji = ":large_yellow_circle: :large_yellow_circle: :large_yellow_circle:"
+		messageColour = "#ffcc00"
+	}
+
+	//var messageColour string
+	//if priority == "high" {
+	//	messageColour = ""
+	//} else if priority == "medium" {
+	//	emoji = ":large_orange_circle: :large_orange_circle: :large_orange_circle:"
+	//} else {
+	//	emoji = ":large_yellow_circle: :large_yellow_circle: :large_yellow_circle:"
+	//}
 
 	api := slackclient.New(string(token))
 	attachment := slackclient.Attachment{
 		Fields: []slackclient.AttachmentField{
 			{
-				Title: "Object Name: " + u.GetName(),
+				Title: emoji + "Resource Change Notification" + emoji,
+				Value: u.GetName() + "/" + u.GetNamespace(),
 			},
 			{
-				Title: "Oh no! Please monitor your resource!",
+				Title: "Example Reason",
+				Value: "Resource was changed by Operator X",
+				Short: true,
 			},
 		},
+		Color: messageColour,
+		Actions: []slackclient.AttachmentAction{
+			{
+				Type: "button",
+				Text: "View Affected Resource",
+				URL:  url,
+			},
+		},
+		Footer: "Notifications provided by Heimdall",
 	}
 
 	// Send message to Slack
-	_, _, err := api.PostMessage(
+	if _, _, err := api.PostMessage(
 		channel,
 		slack.MsgOptionAttachments(attachment),
 		slackclient.MsgOptionAsUser(true),
-	)
-	if err != nil {
+	); err != nil {
 		return err
 	} else {
 		return nil

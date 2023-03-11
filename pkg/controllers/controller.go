@@ -182,7 +182,7 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{}, err
 	}
 
-	err = c.ReconcileNotificationCadence(request, resource, priority, cm, secret)
+	err = c.ReconcileNotificationCadence(request, resource, url, priority, cm, secret)
 	if err != nil {
 		return ctrl.Result{}, nil
 	}
@@ -190,15 +190,15 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	return reconcile.Result{}, nil
 }
 
-func sendSlackNotification(name string, resource *u.Unstructured, secret v1.Secret, configMap v1.ConfigMap) error {
-	if err := slack.SendEvent(*resource, secret, configMap); err != nil {
+func sendSlackNotification(name string, resource *u.Unstructured, url string, priority string, secret v1.Secret, configMap v1.ConfigMap) error {
+	if err := slack.SendEvent(*resource, url, priority, secret, configMap); err != nil {
 		return err
 	}
 	lastNotificationTimes.Store(name, time.Now())
 	return nil
 }
 
-func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, resource *u.Unstructured, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
+func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, resource *u.Unstructured, url string, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
 	cadence, err := time.ParseDuration(configMap.Data[priority+"-priority-cadence"])
 	if err != nil {
 		return err
@@ -212,7 +212,7 @@ func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, res
 		}
 	}
 
-	if err = sendSlackNotification(request.NamespacedName.String(), resource, secret, configMap); err != nil {
+	if err = sendSlackNotification(request.NamespacedName.String(), resource, url, priority, secret, configMap); err != nil {
 		return err
 	}
 	return nil
@@ -287,7 +287,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 10)
+		ticker := time.NewTicker(time.Second * 1)
 
 		for {
 			select {

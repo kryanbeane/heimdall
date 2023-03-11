@@ -10,13 +10,10 @@ import (
 )
 
 var (
-	gcp          = "gce"
-	aws          = "aws"
-	azure        = "azure"
-	digitaloceon = "digitaloceon"
-	ibm          = "ibm"
-	vmware       = "vmware"
-	openshift    = "openshift"
+	gcp       = "gce"
+	aws       = "aws"
+	azure     = "azure"
+	openshift = "openshift"
 )
 
 var resourceInfo gcp2.ResourceInformation
