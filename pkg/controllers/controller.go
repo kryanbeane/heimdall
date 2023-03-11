@@ -4,6 +4,8 @@ import (
 	"context"
 	"github.com/gertd/go-pluralize"
 	"github.com/heimdall-controller/heimdall/pkg/slack"
+	"github.com/heimdall-controller/heimdall/pkg/slack/provider"
+	gcp2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/gcp"
 	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
@@ -93,8 +95,8 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		return err
 	}
 
-	// Fetch provider id
-	_ = slack.GetProviderId(clientset)
+	//// Fetch provider id
+	//_ = provider.GetProviderId(clientset)
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 	if err != nil {
@@ -159,6 +161,16 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 			return reconcile.Result{}, err
 		}
 	}
+
+	// Get notification URL
+	url := provider.BuildNotificationURL(*clientset,
+		gcp2.ResourceInformation{
+			Name:      resource.GetName(),
+			Namespace: resource.GetNamespace(),
+			NodeName:  "",
+		},
+	)
+	logrus.Infof("notification url: %s", url)
 
 	cm, err := c.ReconcileConfigMap(ctx)
 	if err != nil {
