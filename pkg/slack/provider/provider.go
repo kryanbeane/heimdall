@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	aws2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/aws"
 	gcp2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/gcp"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,7 +39,7 @@ func BuildNotificationURL(client kubernetes.Clientset, resourceInformation gcp2.
 	case providerID == gcp:
 		link = gcp2.BuildGCPLink(provider, resourceInfo)
 	case provider == aws:
-		logrus.Infof("Provider is AWS")
+		link = aws2.BuildAWSLink(provider, resourceInfo)
 	case provider == azure:
 		logrus.Infof("Provider is Azure")
 	case provider == openshift:
