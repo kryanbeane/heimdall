@@ -4,6 +4,8 @@ import (
 	"context"
 	"github.com/gertd/go-pluralize"
 	"github.com/heimdall-controller/heimdall/pkg/slack"
+	"github.com/heimdall-controller/heimdall/pkg/slack/provider"
+	gcp2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/gcp"
 	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
@@ -14,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -63,6 +66,8 @@ var secret = v1.Secret{
 	},
 }
 
+var clientset *kubernetes.Clientset
+
 var resources = sync.Map{}
 var lastNotificationTimes = sync.Map{}
 
@@ -83,6 +88,15 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		logrus.Errorf("failed to create controller: %v", err)
 		return err
 	}
+
+	// Create a Kubernetes client for low-level work
+	clientset, err = kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return err
+	}
+
+	//// Fetch provider id
+	//_ = provider.GetProviderId(clientset)
 
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 	if err != nil {
@@ -148,6 +162,16 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		}
 	}
 
+	// Get notification URL
+	url := provider.BuildNotificationURL(*clientset,
+		gcp2.ResourceInformation{
+			Name:      resource.GetName(),
+			Namespace: resource.GetNamespace(),
+			NodeName:  "",
+		},
+	)
+	logrus.Infof("notification url: %s", url)
+
 	cm, err := c.ReconcileConfigMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -158,7 +182,7 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{}, err
 	}
 
-	err = c.ReconcileNotificationCadence(request, resource, priority, cm, secret)
+	err = c.ReconcileNotificationCadence(request, resource, url, priority, cm, secret)
 	if err != nil {
 		return ctrl.Result{}, nil
 	}
@@ -166,15 +190,15 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	return reconcile.Result{}, nil
 }
 
-func SendSlackNotification(name string, resource *u.Unstructured, secret v1.Secret, configMap v1.ConfigMap) error {
-	if err := slack.SendEvent(*resource, secret, configMap); err != nil {
+func sendSlackNotification(name string, resource *u.Unstructured, url string, priority string, secret v1.Secret, configMap v1.ConfigMap) error {
+	if err := slack.SendEvent(*resource, url, priority, secret, configMap); err != nil {
 		return err
 	}
 	lastNotificationTimes.Store(name, time.Now())
 	return nil
 }
 
-func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, resource *u.Unstructured, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
+func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, resource *u.Unstructured, url string, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
 	cadence, err := time.ParseDuration(configMap.Data[priority+"-priority-cadence"])
 	if err != nil {
 		return err
@@ -188,7 +212,7 @@ func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, res
 		}
 	}
 
-	if err = SendSlackNotification(request.NamespacedName.String(), resource, secret, configMap); err != nil {
+	if err = sendSlackNotification(request.NamespacedName.String(), resource, url, priority, secret, configMap); err != nil {
 		return err
 	}
 	return nil
@@ -263,7 +287,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 30)
+		ticker := time.NewTicker(time.Second * 1)
 
 		for {
 			select {
@@ -278,52 +302,22 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 				for _, item := range unstructuredItems {
 					item := item
 					go func() {
-						// Add the unstructured item to the resources map
-						if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
-							resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
-						}
+						if item.GetName() != "" && item.GetNamespace() != "" {
+							// Add the unstructured item to the resources map
+							if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
+								resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
+							}
 
-						err = controller.Watch(
-							&source.Kind{Type: &item},
-							&handler.EnqueueRequestForObject{},
-							pred)
-						if err != nil {
-							return
+							err = controller.Watch(
+								&source.Kind{Type: &item},
+								&handler.EnqueueRequestForObject{},
+								pred)
+							if err != nil {
+								return
+							}
 						}
 					}()
 				}
-
-				//for _, item := range unstructuredItems {
-				//	i := item
-				//	go func() {
-				//		watcher, err := dynamicClient.Resource(GroupVersionResourceFromUnstructured(&i)).Watch(context.TODO(), metav1.ListOptions{LabelSelector: "app.heimdall.io/watching=priority-level"})
-				//		if err != nil {
-				//			return
-				//		}
-				//
-				//		logrus.Infof("Watching Events on Resource: %s of type: %s", i.GetName(), i.GetObjectKind().GroupVersionKind().Kind)
-				//
-				//		for {
-				//			event, ok := <-watcher.ResultChan()
-				//			if !ok {
-				//				return
-				//			}
-				//
-				//			if event.Type == watch.Modified {
-				//				unstructuredObj, ok := event.Object.(*u.Unstructured)
-				//				if !ok {
-				//					logrus.Error("error converting object to *unstructured.Unstructured")
-				//					continue
-				//				}
-				//
-				//				if unstructuredObj.GetName() == i.GetName() {
-				//					logrus.Infof("Resource %s has been modified", i.GetName())
-				//					// TODO: Process the event
-				//				}
-				//			}
-				//		}
-				//	}()
-				//}
 			}
 		}
 	}()
