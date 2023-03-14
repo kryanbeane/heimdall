@@ -3,8 +3,9 @@ package provider
 import (
 	"context"
 	aws2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/aws"
+	azure2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/azure"
 	gcp2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/gcp"
-	"github.com/sirupsen/logrus"
+	openshift2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/openshift"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"strings"
@@ -41,9 +42,9 @@ func BuildNotificationURL(client kubernetes.Clientset, resourceInformation gcp2.
 	case provider == aws:
 		link = aws2.BuildAWSLink(provider, resourceInfo)
 	case provider == azure:
-		logrus.Infof("Provider is Azure")
+		azure2.BuildAzureLink(provider, resourceInfo)
 	case provider == openshift:
-		logrus.Infof("Provider is OpenShift")
+		openshift2.BuildOpenshiftLink(provider, resourceInfo)
 	default:
 		link = "http://127.0.0.1:40307/api/v1/namespaces/" + resourceInfo.Namespace + "/services/http:kubernetes-dashboard:/proxy/#/deployment/" + resourceInfo.Namespace + "/" + resourceInfo.Name + "?namespace=" + resourceInfo.Namespace
 	}
