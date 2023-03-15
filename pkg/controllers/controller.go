@@ -177,6 +177,11 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{}, err
 	}
 
+	if cm.Data == nil {
+		logrus.Warn("config map not configured, please configure Heimdall config map")
+		return reconcile.Result{}, nil
+	}
+
 	secret, err = c.ReconcileSecret(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -249,6 +254,11 @@ func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, erro
 		return v1.ConfigMap{}, err
 	}
 
+	channelValue := cm.Data["slack-channel"]
+	if channelValue == "default-heimdall-channel" || channelValue == "" {
+		return v1.ConfigMap{}, nil
+	}
+
 	// Successfully retrieved configmap
 	return cm, nil
 }
@@ -264,7 +274,7 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 			// Successful creation
 			return secret, nil
 		}
-		return v1.Secret{}, err
+		return v1.Secret{Data: nil}, err
 	}
 
 	// Successfully retrieved configmap
