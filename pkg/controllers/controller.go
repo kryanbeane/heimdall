@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"github.com/gertd/go-pluralize"
+	"github.com/heimdall-controller/heimdall/pkg/controllers/mapHelpers"
 	"github.com/heimdall-controller/heimdall/pkg/slack"
 	"github.com/heimdall-controller/heimdall/pkg/slack/provider"
 	gcp2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/gcp"
@@ -96,9 +97,6 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		return err
 	}
 
-	//// Fetch provider id
-	//_ = provider.GetProviderId(clientset)
-
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 	if err != nil {
 		return err
@@ -111,27 +109,18 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 	return nil
 }
 
-func getMapLength(m *sync.Map) int {
-	var count int
-	m.Range(func(_, _ interface{}) bool {
-		count++
-		return true
-	})
-	return count
-}
-
 func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 
-	watchingResourcesCount.Set(float64(getMapLength(&resources)))
+	watchingResourcesCount.Set(float64(mapHelpers.GetMapLength(&resources)))
 
-	resourceRef, ok := c.RetrieveResourceFromMap(request.NamespacedName.String(), &resources)
+	resourceRef, ok := mapHelpers.RetrieveResourceFromMap(request.NamespacedName.String(), &resources)
 	if !ok {
 		logrus.Errorf("failed to retrieve resource from map: %v", request.NamespacedName.String())
 		return reconcile.Result{}, nil
 	}
 
 	// Update the map with the latest resource version
-	c.UpdateMapWithResource(resourceRef, &resources)
+	mapHelpers.UpdateMapWithResource(resourceRef, &resources)
 
 	gvr := GVRFromUnstructured(resourceRef)
 	resource, err := c.DynamicClient.Resource(gvr).Namespace(resourceRef.GetNamespace()).Get(ctx, resourceRef.GetName(), metav1.GetOptions{})
@@ -227,18 +216,6 @@ func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, res
 	return nil
 }
 
-func (c *Controller) RetrieveResourceFromMap(key string, m *sync.Map) (u.Unstructured, bool) {
-	if res, ok := m.Load(key); !ok {
-		return u.Unstructured{}, false
-	} else {
-		return res.(u.Unstructured), true
-	}
-}
-
-func (c *Controller) UpdateMapWithResource(resource u.Unstructured, m *sync.Map) {
-	m.Store(resource.GetNamespace()+"/"+resource.GetName(), resource)
-}
-
 func GVRFromUnstructured(o u.Unstructured) schema.GroupVersionResource {
 	resource := strings.ToLower(pluralize.NewClient().Plural(o.GetObjectKind().GroupVersionKind().Kind))
 	return schema.GroupVersionResource{Group: o.GetObjectKind().GroupVersionKind().Group, Version: o.GetObjectKind().GroupVersionKind().Version, Resource: resource}
@@ -323,7 +300,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 					go func() {
 						if item.GetName() != "" && item.GetNamespace() != "" {
 							// Add the unstructured item to the resources map
-							if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
+							if _, ok := mapHelpers.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
 								resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
 							}
 
