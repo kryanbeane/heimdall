@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"github.com/gertd/go-pluralize"
-	"github.com/heimdall-controller/heimdall/pkg/controllers/mapHelpers"
+	"github.com/heimdall-controller/heimdall/pkg/controllers/jq"
+	"github.com/heimdall-controller/heimdall/pkg/controllers/map"
 	"github.com/heimdall-controller/heimdall/pkg/slack"
 	"github.com/heimdall-controller/heimdall/pkg/slack/provider"
 	gcp2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/gcp"
-	"github.com/itchyny/gojq"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -111,16 +111,16 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 
 func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 
-	watchingResourcesCount.Set(float64(mapHelpers.GetMapLength(&resources)))
+	watchingResourcesCount.Set(float64(_map.GetMapLength(&resources)))
 
-	resourceRef, ok := mapHelpers.RetrieveResourceFromMap(request.NamespacedName.String(), &resources)
+	resourceRef, ok := _map.RetrieveResourceFromMap(request.NamespacedName.String(), &resources)
 	if !ok {
 		logrus.Errorf("failed to retrieve resource from map: %v", request.NamespacedName.String())
 		return reconcile.Result{}, nil
 	}
 
 	// Update the map with the latest resource version
-	mapHelpers.UpdateMapWithResource(resourceRef, &resources)
+	_map.UpdateMapWithResource(resourceRef, &resources)
 
 	gvr := GVRFromUnstructured(resourceRef)
 	resource, err := c.DynamicClient.Resource(gvr).Namespace(resourceRef.GetNamespace()).Get(ctx, resourceRef.GetName(), metav1.GetOptions{})
@@ -289,7 +289,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 			select {
 			case <-ticker.C:
 
-				unstructuredItems, err := DiscoverClusterGRVs(context.TODO(), discoveryClient, dynamicClient, requiredLabel)
+				unstructuredItems, err := jq.DiscoverClusterGRVs(context.TODO(), discoveryClient, dynamicClient, requiredLabel)
 				if err != nil {
 					logrus.Errorf("error discovering cluster resources: %v", err)
 					return
@@ -300,7 +300,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 					go func() {
 						if item.GetName() != "" && item.GetNamespace() != "" {
 							// Add the unstructured item to the resources map
-							if _, ok := mapHelpers.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
+							if _, ok := _map.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
 								resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
 							}
 
@@ -318,113 +318,4 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 		}
 	}()
 	return nil
-}
-
-func GetUnstructuredResourceList(dynamic dynamic.Interface, ctx context.Context, group string, version string, resource string) ([]u.Unstructured, error) {
-	resourceId := schema.GroupVersionResource{
-		Group:    group,
-		Version:  version,
-		Resource: resource,
-	}
-
-	list, err := dynamic.Resource(resourceId).Namespace("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-
-	return list.Items, nil
-}
-
-func DiscoverClusterGRVs(ctx context.Context, dc *discovery.DiscoveryClient, di dynamic.Interface, requiredLabelQuery string) ([]u.Unstructured, error) {
-	var g, v, r string
-	var items []u.Unstructured
-
-	// Get all server groups found in the cluster
-	apiGroupList, err := dc.ServerGroups()
-	if err != nil {
-		panic(err)
-	}
-
-	// Loop through all groups found, so apps, events.k8s.io, apiregistration.k8s.io, etc... (and custom groups - like heimdall.k8s.io)
-	for _, apiGroup := range apiGroupList.Groups {
-
-		// Loop through all versions found in each group, so v1, v1beta1, etc...
-		for _, version := range apiGroup.Versions {
-
-			// Get a list of all server resources for each group version found in the cluster
-			groupVersion, err := dc.ServerResourcesForGroupVersion(version.GroupVersion)
-			if err != nil {
-				return nil, err
-			}
-
-			// Loop through all resources found in each group version
-			for _, resource := range groupVersion.APIResources {
-				g = apiGroup.Name
-				v = version.Version
-
-				if !strings.Contains(resource.Name, "/") {
-					r = resource.Name
-
-					// Get a list of all objects in the group/version/resource in json with the label
-					jqItems, err := GetResourcesByJq(di, ctx, g, v, r, requiredLabelQuery)
-					if err != nil {
-						continue
-					}
-
-					items = append(items, jqItems...)
-				}
-			}
-		}
-	}
-
-	return items, nil
-}
-
-func GetResourcesByJq(dynamic dynamic.Interface, ctx context.Context, group string, version string, resource string, labelQuery string) ([]u.Unstructured, error) {
-	resources := make([]u.Unstructured, 0)
-
-	query, err := gojq.Parse(labelQuery)
-	if err != nil {
-		logrus.Errorf("error parsing jq query: %v", err)
-		return nil, err
-	}
-
-	items, err := GetUnstructuredResourceList(dynamic, ctx, group, version, resource)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, item := range items {
-
-		// Convert object to raw JSON
-		var rawJson interface{}
-		err = runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &rawJson)
-		if err != nil {
-			logrus.Errorf("error converting object to raw JSON: %v", err)
-			return nil, err
-		}
-
-		// Evaluate jq against JSON
-		iter := query.Run(rawJson)
-		for {
-			result, ok := iter.Next()
-			if !ok {
-				break
-			}
-			if err, ok := result.(error); ok {
-				if err != nil {
-					logrus.Errorf("error evaluating jq: %v", err)
-					return nil, err
-				}
-			} else {
-				boolResult, ok := result.(bool)
-				if !ok {
-					logrus.Errorf("error converting jq result to bool: %v", err)
-				} else if boolResult {
-					resources = append(resources, item)
-				}
-			}
-		}
-	}
-	return resources, nil
 }
