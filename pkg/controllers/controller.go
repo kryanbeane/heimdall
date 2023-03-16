@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"bytes"
 	"context"
 	"github.com/gertd/go-pluralize"
 	"github.com/heimdall-controller/heimdall/pkg/slack"
@@ -176,10 +177,18 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	if cm.Data == nil {
+		logrus.Warn("config map not configured, please configure Heimdall config map")
+		return reconcile.Result{}, nil
+	}
 
 	secret, err = c.ReconcileSecret(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
+	}
+	if secret.Data == nil {
+		logrus.Warn("secret not configured, please configure Heimdall secret")
+		return reconcile.Result{}, nil
 	}
 
 	err = c.ReconcileNotificationCadence(request, resource, url, priority, cm, secret)
@@ -249,6 +258,11 @@ func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, erro
 		return v1.ConfigMap{}, err
 	}
 
+	channelValue := cm.Data["slack-channel"]
+	if channelValue == "default-heimdall-channel" || channelValue == "" {
+		return v1.ConfigMap{Data: nil}, nil
+	}
+
 	// Successfully retrieved configmap
 	return cm, nil
 }
@@ -265,6 +279,11 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 			return secret, nil
 		}
 		return v1.Secret{}, err
+	}
+
+	slackValue := s.Data["slack-token"]
+	if slackValue == nil || bytes.Equal(slackValue, []byte("your-token")) {
+		return v1.Secret{Data: nil}, nil
 	}
 
 	// Successfully retrieved configmap
