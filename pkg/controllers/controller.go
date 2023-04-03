@@ -15,17 +15,16 @@ import (
 	u "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 	"strings"
 	"sync"
 	"time"
@@ -79,7 +78,7 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		return err
 	}
 
-	ctrlr, err := controller.New("controller", mgr,
+	_, err = controller.New("controller", mgr,
 		controller.Options{Reconciler: &Controller{
 			Client:        mgr.GetClient(),
 			Scheme:        mgr.GetScheme(),
@@ -104,7 +103,7 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		return err
 	}
 
-	if err := c.WatchResources(ctrlr, discoveryClient, dynamicClient, requiredLabel); err != nil {
+	if err := c.WatchResources(discoveryClient, dynamicClient, requiredLabel); err != nil {
 		return err
 	}
 
@@ -290,10 +289,10 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 	return s, nil
 }
 
-func (c *Controller) WatchResources(controller controller.Controller, discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
+func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
 
 	// Create label selector containing the specified label key with no value (LabelSelectorOpExists checks that key exists)
-	pred, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
+	_, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
 		MatchExpressions: []metav1.LabelSelectorRequirement{
 			{
 				Key:      watchingLabel,
@@ -306,7 +305,7 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 1)
+		ticker := time.NewTicker(time.Second * 20)
 
 		for {
 			select {
@@ -319,23 +318,54 @@ func (c *Controller) WatchResources(controller controller.Controller, discoveryC
 				}
 
 				for _, item := range unstructuredItems {
-					item := item
+
+					i := item
 					go func() {
-						if item.GetName() != "" && item.GetNamespace() != "" {
-							// Add the unstructured item to the resources map
-							if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
-								resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
+						watcher, err := dynamicClient.Resource(GVRFromUnstructured(i)).Watch(context.TODO(), metav1.ListOptions{})
+						if err != nil {
+							return
+						}
+
+						logrus.Infof("Watching Events on Resource: %s of type: %s", i.GetName(), i.GetObjectKind().GroupVersionKind().Kind)
+
+						for {
+							event, ok := <-watcher.ResultChan()
+							if !ok {
+								return
 							}
 
-							err = controller.Watch(
-								&source.Kind{Type: &item},
-								&handler.EnqueueRequestForObject{},
-								pred)
-							if err != nil {
-								return
+							if event.Type == watch.Modified {
+								unstructuredObj, ok := event.Object.(*u.Unstructured)
+								if !ok {
+									logrus.Error("error converting object to *unstructured.Unstructured")
+									continue
+								}
+
+								if unstructuredObj.GetName() == i.GetName() {
+									logrus.Infof("Resource %s has been modified", i.GetName())
+									// TODO: Process the event
+								}
 							}
 						}
 					}()
+
+					//item := item
+					//go func() {
+					//	if item.GetName() != "" && item.GetNamespace() != "" {
+					//		// Add the unstructured item to the resources map
+					//		if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
+					//			resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
+					//		}
+					//
+					//		err = controller.Watch(
+					//			&source.Kind{Type: &item},
+					//			&handler.EnqueueRequestForObject{},
+					//			pred)
+					//		if err != nil {
+					//			return
+					//		}
+					//	}
+					//}()
 				}
 			}
 		}
