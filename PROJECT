@@ -7,4 +7,4 @@ plugins:
 projectName: heimdall
 repo: github.com/heimdall-controller/heimdall
 resources:
-version: "0.3.0"
+version: "3"

@@ -43,7 +43,7 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 
 const (
 	configMapName = "heimdall-settings"
-	namespace     = "heimdall-controller"
+	namespace     = "heimdall"
 	watchingLabel = "app.heimdall.io/watching"
 	secretName    = "heimdall-secret"
 )
@@ -95,6 +95,10 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 	}
 	logrus.Infof("Initialized Heimdall controller: %s", ctr)
 
+	RegisterMetrics()
+
+	logrus.Infof("Custom Prometheus Metrics registered")
+
 	// Create a Kubernetes client for low-level work
 	clientset, err = kubernetes.NewForConfig(mgr.GetConfig())
 	if err != nil {
@@ -134,7 +138,7 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 	// Build notification URL
 	// Reconcile notification stuff
 	// Reconcile cadence
-
+	logrus.Info("IM A TEST")
 	watchingResourcesCount.Set(float64(getMapLength(&resources)))
 
 	res, found := c.RetrieveResource(namespacedName(resource), &resources)
@@ -261,6 +265,10 @@ func (c *Controller) UpdateMapWithResource(resource u.Unstructured, m *sync.Map)
 	m.Store(namespacedName(&resource), resource)
 }
 
+func (c *Controller) DeleteResource(key string, m *sync.Map) {
+	m.Delete(key)
+}
+
 func GVRFromUnstructured(o u.Unstructured) schema.GroupVersionResource {
 	resource := strings.ToLower(pluralize.NewClient().Plural(o.GetObjectKind().GroupVersionKind().Kind))
 	return schema.GroupVersionResource{Group: o.GetObjectKind().GroupVersionKind().Group, Version: o.GetObjectKind().GroupVersionKind().Version, Resource: resource}
@@ -327,7 +335,7 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 100)
+		ticker := time.NewTicker(time.Second * 5)
 
 		for {
 			select {
@@ -367,47 +375,23 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 									logrus.Error("error converting object to *unstructured.Unstructured")
 									continue
 								}
-
 								// Update the resource in the map
 								c.UpdateMapWithResource(*unstructuredObj, &resources)
 
 								logrus.Infof("Object %s has been modified", namespacedName)
 
 								if namespacedName != "/" {
-									logrus.Infof("Resource %s has been modified", namespacedName)
-
 									_, err := c.resourceReconcile(context.TODO(), &item)
 									if err != nil {
 										return
 									}
 
-									//TODO Move reconcile logic to standalone function
-									// call it here
-									// have a map containing the resources being watched
-									// if the resource is not in the map, add it
-									// if the resource is in the map, update it
+									// Reconcile has completed so we can now delete the resource from the map
+									c.DeleteResource(namespacedName, &resources)
 								}
 							}
 						}
 					}()
-
-					//item := item
-					//go func() {
-					//	if item.GetName() != "" && item.GetNamespace() != "" {
-					//		// Add the unstructured item to the resources map
-					//		if _, ok := c.RetrieveResourceFromMap(item.GetNamespace()+item.GetName(), &resources); !ok {
-					//			resources.Store(item.GetNamespace()+"/"+item.GetName(), item)
-					//		}
-					//
-					//		err = controller.Watch(
-					//			&source.Kind{Type: &item},
-					//			&handler.EnqueueRequestForObject{},
-					//			pred)
-					//		if err != nil {
-					//			return
-					//		}
-					//	}
-					//}()
 				}
 			}
 		}
