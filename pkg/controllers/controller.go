@@ -36,6 +36,11 @@ type Controller struct {
 	DynamicClient dynamic.Interface
 }
 
+// Reconcile Placeholder for now as we don't need a traditional reconcile loop
+func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+	return reconcile.Result{}, nil
+}
+
 const (
 	configMapName = "heimdall-settings"
 	namespace     = "heimdall-controller"
@@ -78,7 +83,7 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		return err
 	}
 
-	_, err = controller.New("controller", mgr,
+	ctr, err := controller.New("controller", mgr,
 		controller.Options{Reconciler: &Controller{
 			Client:        mgr.GetClient(),
 			Scheme:        mgr.GetScheme(),
@@ -88,6 +93,7 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		logrus.Errorf("failed to create controller: %v", err)
 		return err
 	}
+	logrus.Infof("Initialized Heimdall controller: %s", ctr)
 
 	// Create a Kubernetes client for low-level work
 	clientset, err = kubernetes.NewForConfig(mgr.GetConfig())
@@ -119,45 +125,48 @@ func getMapLength(m *sync.Map) int {
 	return count
 }
 
-func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstructured) (reconcile.Result, error) {
+	// THIS FUNC WILL ONLY BE TRIGGERED ON A RESOURCE CHANGE
+	//TODO Changes that need to be done here once moved to standalone function
+	// Refetch the resource (to get most up to date)
+	// Update map with latest version
+	// Reconcile label to ensure it should still be watched, if not then delete from map
+	// Build notification URL
+	// Reconcile notification stuff
+	// Reconcile cadence
 
 	watchingResourcesCount.Set(float64(getMapLength(&resources)))
 
-	resourceRef, ok := c.RetrieveResourceFromMap(request.NamespacedName.String(), &resources)
-	if !ok {
-		logrus.Errorf("failed to retrieve resource from map: %v", request.NamespacedName.String())
+	res, found := c.RetrieveResource(namespacedName(resource), &resources)
+	if !found {
+		logrus.Errorf("failed to retrieve resource from map: %v", namespacedName(resource))
 		return reconcile.Result{}, nil
 	}
+	gvr := GVRFromUnstructured(res)
+
+	logrus.Infof("reconciling %s with importance of %s", namespacedName(&res), res.GetLabels()[watchingLabel])
 
 	// Update the map with the latest resource version
-	c.UpdateMapWithResource(resourceRef, &resources)
-
-	gvr := GVRFromUnstructured(resourceRef)
-	resource, err := c.DynamicClient.Resource(gvr).Namespace(resourceRef.GetNamespace()).Get(ctx, resourceRef.GetName(), metav1.GetOptions{})
-	if err != nil {
-		return reconcile.Result{}, err
-	}
-
-	logrus.Infof("reconciling %s with importance of %s", request.NamespacedName, resource.GetLabels()[watchingLabel])
+	c.UpdateMapWithResource(res, &resources)
 
 	// If resource no longer has the label or if label is empty (no priority set) then delete it from the map
-	if value, labelExists := resource.GetLabels()[watchingLabel]; !labelExists || value == "" {
-		resources.Delete(request.NamespacedName.String())
+	if value, labelExists := res.GetLabels()[watchingLabel]; !labelExists || value == "" {
+		resources.Delete(namespacedName(&res))
 		return reconcile.Result{}, nil
 	}
 
 	// Set priority level based on label - if invalid priority, default to low
-	priority := strings.ToLower(resource.GetLabels()[watchingLabel])
+	priority := strings.ToLower(res.GetLabels()[watchingLabel])
 	if priority != "low" && priority != "medium" && priority != "high" {
-		logrus.Warnf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, resource.GetName())
-		resource.GetLabels()[watchingLabel] = "low"
+		logrus.Warnf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, res.GetName())
+		res.GetLabels()[watchingLabel] = "low"
 
-		labels := resource.GetLabels()
+		labels := res.GetLabels()
 		labels[watchingLabel] = "low"
-		resource.SetLabels(labels)
+		res.SetLabels(labels)
 		priority = "low"
 
-		if _, err := c.DynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Update(ctx, resource, metav1.UpdateOptions{}); err != nil {
+		if _, err := c.DynamicClient.Resource(gvr).Namespace(res.GetNamespace()).Update(ctx, &res, metav1.UpdateOptions{}); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
@@ -165,8 +174,8 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	// Get notification URL
 	url := provider.BuildNotificationURL(*clientset,
 		gcp2.ResourceInformation{
-			Name:      resource.GetName(),
-			Namespace: resource.GetNamespace(),
+			Name:      res.GetName(),
+			Namespace: res.GetNamespace(),
 			NodeName:  "",
 		},
 	)
@@ -190,12 +199,16 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 		return reconcile.Result{}, nil
 	}
 
-	err = c.ReconcileNotificationCadence(request, resource, url, priority, cm, secret)
+	err = c.ReconcileNotificationCadence(&res, url, priority, cm, secret)
 	if err != nil {
 		return ctrl.Result{}, nil
 	}
 
 	return reconcile.Result{}, nil
+}
+
+func namespacedName(resource *u.Unstructured) string {
+	return resource.GetNamespace() + "/" + resource.GetName()
 }
 
 func sendSlackNotification(name string, resource *u.Unstructured, url string, priority string, secret v1.Secret, configMap v1.ConfigMap) error {
@@ -206,36 +219,46 @@ func sendSlackNotification(name string, resource *u.Unstructured, url string, pr
 	return nil
 }
 
-func (c *Controller) ReconcileNotificationCadence(request reconcile.Request, resource *u.Unstructured, url string, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
+func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url string, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
 	cadence, err := time.ParseDuration(configMap.Data[priority+"-priority-cadence"])
 	if err != nil {
 		return err
 	}
 
-	lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(request.NamespacedName.String(), time.Now())
+	lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(namespacedName(resource), time.Now())
 	if loaded {
 		if !lastNotificationTime.(time.Time).Add(cadence).Before(time.Now()) {
-			logrus.Warnf("skipping notification for %s because the last message was sent less than %s ago", request.NamespacedName.String(), cadence.String())
+			logrus.Warnf("skipping notification for %s because the last message was sent less than %s ago", namespacedName(resource), cadence.String())
 			return nil
 		}
 	}
 
-	if err = sendSlackNotification(request.NamespacedName.String(), resource, url, priority, secret, configMap); err != nil {
+	if err = sendSlackNotification(namespacedName(resource), resource, url, priority, secret, configMap); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (c *Controller) RetrieveResourceFromMap(key string, m *sync.Map) (u.Unstructured, bool) {
-	if res, ok := m.Load(key); !ok {
-		return u.Unstructured{}, false
-	} else {
+func (c *Controller) RetrieveOrStoreResource(key string, resource u.Unstructured, m *sync.Map) (u.Unstructured, bool) {
+	if res, loaded := m.LoadOrStore(key, resource); !loaded {
+		return resource, true
+	} else if loaded {
 		return res.(u.Unstructured), true
+	} else {
+		return u.Unstructured{}, false
+	}
+}
+
+func (c *Controller) RetrieveResource(key string, m *sync.Map) (u.Unstructured, bool) {
+	if res, ok := m.Load(key); ok {
+		return res.(u.Unstructured), true
+	} else {
+		return u.Unstructured{}, true
 	}
 }
 
 func (c *Controller) UpdateMapWithResource(resource u.Unstructured, m *sync.Map) {
-	m.Store(resource.GetNamespace()+"/"+resource.GetName(), resource)
+	m.Store(namespacedName(&resource), resource)
 }
 
 func GVRFromUnstructured(o u.Unstructured) schema.GroupVersionResource {
@@ -290,7 +313,6 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 }
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
-
 	// Create label selector containing the specified label key with no value (LabelSelectorOpExists checks that key exists)
 	_, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
 		MatchExpressions: []metav1.LabelSelectorRequirement{
@@ -305,7 +327,7 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 20)
+		ticker := time.NewTicker(time.Second * 100)
 
 		for {
 			select {
@@ -318,17 +340,22 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 				}
 
 				for _, item := range unstructuredItems {
+					// If not in the map; add it. if in the map; update it.
+					c.UpdateMapWithResource(item, &resources)
 
-					i := item
+					item := item
+					namespacedName := namespacedName(&item)
 					go func() {
-						watcher, err := dynamicClient.Resource(GVRFromUnstructured(i)).Watch(context.TODO(), metav1.ListOptions{})
+						// Set up watch for the item
+						watcher, err := dynamicClient.Resource(GVRFromUnstructured(item)).Watch(context.TODO(), metav1.ListOptions{})
 						if err != nil {
 							return
 						}
 
-						logrus.Infof("Watching Events on Resource: %s of type: %s", i.GetName(), i.GetObjectKind().GroupVersionKind().Kind)
+						logrus.Infof("Watching Events on Resource: %s", namespacedName)
 
 						for {
+							// Iterate over events
 							event, ok := <-watcher.ResultChan()
 							if !ok {
 								return
@@ -341,9 +368,24 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 									continue
 								}
 
-								if unstructuredObj.GetName() == i.GetName() {
-									logrus.Infof("Resource %s has been modified", i.GetName())
-									// TODO: Process the event
+								// Update the resource in the map
+								c.UpdateMapWithResource(*unstructuredObj, &resources)
+
+								logrus.Infof("Object %s has been modified", namespacedName)
+
+								if namespacedName != "/" {
+									logrus.Infof("Resource %s has been modified", namespacedName)
+
+									_, err := c.resourceReconcile(context.TODO(), &item)
+									if err != nil {
+										return
+									}
+
+									//TODO Move reconcile logic to standalone function
+									// call it here
+									// have a map containing the resources being watched
+									// if the resource is not in the map, add it
+									// if the resource is in the map, update it
 								}
 							}
 						}
