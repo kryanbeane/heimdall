@@ -16,7 +16,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: heimdall-secret
-  namespace: heimdall-controller
+  namespace: heimdall
 data:
   slack-token: $encoded_string
 type: Opaque

@@ -1,0 +1,19 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-k8s-role
+  namespace: heimdall
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - endpoints
+      - pods
+      - services
+      - nodes
+      - secrets
+      - deployments
+    verbs:
+      - get
+      - list
+      - watch

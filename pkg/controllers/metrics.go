@@ -1,12 +1,15 @@
 package controllers
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
+)
 
-var watchingResourcesCount = prometheus.NewGauge(prometheus.GaugeOpts{
+var WatchingResourcesCount = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "heimdall_watching_resource_count",
 	Help: "Number of resources being watched by Heimdall",
 })
 
-func init() {
-	prometheus.MustRegister(watchingResourcesCount)
+func NewMetrics() {
+	metrics.Registry.MustRegister(WatchingResourcesCount)
 }
