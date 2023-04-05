@@ -95,7 +95,7 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 	}
 	logrus.Infof("Initialized Heimdall controller: %s", ctr)
 
-	RegisterMetrics()
+	NewMetrics()
 
 	logrus.Infof("Custom Prometheus Metrics registered")
 
@@ -139,7 +139,7 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 	// Reconcile notification stuff
 	// Reconcile cadence
 	logrus.Info("IM A TEST")
-	watchingResourcesCount.Set(float64(getMapLength(&resources)))
+	WatchingResourcesCount.Set(float64(getMapLength(&resources)))
 
 	res, found := c.RetrieveResource(namespacedName(resource), &resources)
 	if !found {

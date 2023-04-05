@@ -11,6 +11,7 @@ metadata:
     app.kubernetes.io/created-by: heimdall
     app.kubernetes.io/part-of: heimdall
     app.kubernetes.io/managed-by: kustomize
+    release: prometheus
   name: controller-manager-metrics-monitor
   namespace: system
 spec:
@@ -23,4 +24,5 @@ spec:
         insecureSkipVerify: true
   selector:
     matchLabels:
+      release: prometheus
       control-plane: controller-manager

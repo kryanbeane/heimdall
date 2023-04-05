@@ -5,11 +5,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
-var watchingResourcesCount = prometheus.NewGauge(prometheus.GaugeOpts{
+var WatchingResourcesCount = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "heimdall_watching_resource_count",
 	Help: "Number of resources being watched by Heimdall",
 })
 
-func RegisterMetrics() {
-	metrics.Registry.MustRegister(watchingResourcesCount)
+func NewMetrics() {
+	metrics.Registry.MustRegister(WatchingResourcesCount)
 }

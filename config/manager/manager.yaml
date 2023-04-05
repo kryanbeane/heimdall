@@ -2,6 +2,7 @@ apiVersion: v1
 kind: Namespace
 metadata:
   labels:
+    prometheus: monitor
     control-plane: controller-manager
     app.kubernetes.io/name: namespace
     app.kubernetes.io/instance: system
@@ -16,6 +17,10 @@ kind: Deployment
 metadata:
   name: controller-manager
   namespace: system
+  annotations:
+    prometheus.io/scrape: 'true'
+    prometheus.io/path: '/metrics'
+    prometheus.io/port: '8080'
   labels:
     control-plane: controller-manager
     app.kubernetes.io/name: deployment
@@ -33,6 +38,9 @@ spec:
     metadata:
       annotations:
         kubectl.kubernetes.io/default-container: manager
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: '/metrics'
+        prometheus.io/port: '8080'
       labels:
         control-plane: controller-manager
     spec:
