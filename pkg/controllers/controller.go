@@ -21,7 +21,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"strings"
 	"sync"
@@ -127,8 +126,7 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 	// Build notification URL
 	// Reconcile notification stuff
 	// Reconcile cadence
-	logrus.Info("IM A TEST")
-	WatchingResourcesCount.Set(float64(helpers.GetMapLength(&resources)))
+g	WatchingResourcesCount.Set(float64(helpers.GetMapLength(&resources)))
 
 	res, found := helpers.RetrieveResource(namespacedName(resource), &resources)
 	if !found {
@@ -279,80 +277,81 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 }
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
-	// Create label selector containing the specified label key with no value (LabelSelectorOpExists checks that key exists)
-	_, err := predicate.LabelSelectorPredicate(metav1.LabelSelector{
-		MatchExpressions: []metav1.LabelSelectorRequirement{
-			{
-				Key:      watchingLabel,
-				Operator: metav1.LabelSelectorOpExists,
-			},
-		},
-	})
-	if err != nil {
-		return err
-	}
-
 	go func() {
 		ticker := time.NewTicker(time.Second * 5)
 
 		for {
 			select {
 			case <-ticker.C:
-
-				unstructuredItems, err := helpers.DiscoverClusterGRVs(context.TODO(), discoveryClient, dynamicClient, requiredLabel)
-				if err != nil {
-					logrus.Errorf("error discovering cluster resources: %v", err)
-					return
-				}
-
-				for _, item := range unstructuredItems {
-					// If not in the map; add it. if in the map; update it.
-					helpers.UpdateMapWithResource(item, namespacedName(&item), &resources)
-
-					item := item
-					namespacedName := namespacedName(&item)
-					go func() {
-						// Set up watch for the item
-						watcher, err := dynamicClient.Resource(helpers.GVRFromUnstructured(item)).Watch(context.TODO(), metav1.ListOptions{})
-						if err != nil {
-							return
-						}
-
-						logrus.Infof("Watching Events on Resource: %s", namespacedName)
-
-						for {
-							// Iterate over events
-							event, ok := <-watcher.ResultChan()
-							if !ok {
-								return
-							}
-
-							if event.Type == watch.Modified {
-								unstructuredObj, ok := event.Object.(*u.Unstructured)
-								if !ok {
-									logrus.Error("error converting object to *unstructured.Unstructured")
-									continue
-								}
-								// Update the resource in the map
-								helpers.UpdateMapWithResource(*unstructuredObj, namespacedName, &resources)
-
-								logrus.Infof("Object %s has been modified", namespacedName)
-
-								if namespacedName != "/" {
-									_, err := c.resourceReconcile(context.TODO(), &item)
-									if err != nil {
-										return
-									}
-
-									// Reconcile has completed so we can now delete the resource from the map
-									helpers.DeleteResource(namespacedName, &resources)
-								}
-							}
-						}
-					}()
-				}
+				c.discoverResourcesAndSetWatch(discoveryClient, dynamicClient, requiredLabel)
 			}
 		}
 	}()
 	return nil
+}
+
+func (c *Controller) discoverResourcesAndSetWatch(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) {
+	unstructuredItems, err := helpers.DiscoverClusterGRVs(context.TODO(), discoveryClient, dynamicClient, requiredLabel)
+	if err != nil {
+		logrus.Errorf("error discovering cluster resources: %v", err)
+		return
+	}
+
+	for _, item := range unstructuredItems {
+		c.updateMapAndWatchResource(dynamicClient, item)
+	}
+}
+
+func (c *Controller) updateMapAndWatchResource(dynamicClient dynamic.Interface, item u.Unstructured) {
+	// If not in the map; add it. if in the map; update it.
+	helpers.UpdateMapWithResource(item, namespacedName(&item), &resources)
+
+	namespacedName := namespacedName(&item)
+	go func() {
+		// Set up watch for the item
+		watcher, err := dynamicClient.Resource(helpers.GVRFromUnstructured(item)).Watch(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			return
+		}
+
+		logrus.Infof("Watching Events on Resource: %s", namespacedName)
+
+		for {
+			// Iterate over events
+			event, ok := <-watcher.ResultChan()
+			if !ok {
+				return
+			}
+
+			if event.Type == watch.Modified {
+				c.handleModifiedEvent(event, item, namespacedName)
+			}
+		}
+	}()
+}
+
+func (c *Controller) handleModifiedEvent(event watch.Event, item u.Unstructured, namespacedName string) {
+	unstructuredObj, ok := event.Object.(*u.Unstructured)
+	if !ok {
+		logrus.Error("error converting object to *unstructured.Unstructured")
+		return
+	}
+	// Update the resource in the map
+	helpers.UpdateMapWithResource(*unstructuredObj, namespacedName, &resources)
+
+	logrus.Infof("Object %s has been modified", namespacedName)
+
+	if namespacedName != "/" {
+		c.triggerResourceReconcile(item, namespacedName)
+	}
+}
+
+func (c *Controller) triggerResourceReconcile(item u.Unstructured, namespacedName string) {
+	_, err := c.resourceReconcile(context.TODO(), &item)
+	if err != nil {
+		return
+	}
+
+	// Reconcile has completed so we can now delete the resource from the map indicating that it does not need a reconcile
+	helpers.DeleteResource(namespacedName, &resources)
 }
