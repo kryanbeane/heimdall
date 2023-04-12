@@ -3,6 +3,7 @@ package controllers
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"github.com/heimdall-controller/heimdall/pkg/controllers/helpers"
 	"github.com/heimdall-controller/heimdall/pkg/slack"
 	"github.com/heimdall-controller/heimdall/pkg/slack/provider"
@@ -17,6 +18,7 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"net"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -28,9 +30,8 @@ import (
 )
 
 type Controller struct {
-	Client        client.Client
-	Scheme        *runtime.Scheme
-	DynamicClient dynamic.Interface
+	Client client.Client
+	Scheme *runtime.Scheme
 }
 
 // Reconcile Placeholder for now as we don't need a traditional reconcile loop
@@ -41,7 +42,8 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 const (
 	configMapName = "heimdall-settings"
 	namespace     = "heimdall"
-	watchingLabel = "app.heimdall.io/watching"
+	priorityLabel = "app.heimdall.io/priority"
+	ownerLabel    = "app.heimdall.io/owner"
 	secretName    = "heimdall-secret"
 )
 
@@ -69,22 +71,18 @@ var secret = v1.Secret{
 }
 
 var clientset *kubernetes.Clientset
-
+var dc *discovery.DiscoveryClient
+var dynamicClient dynamic.Interface
 var resources = sync.Map{}
 var lastNotificationTimes = sync.Map{}
 
 // InitializeController Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel string) error {
-	dynamicClient, err := dynamic.NewForConfig(mgr.GetConfig())
-	if err != nil {
-		return err
-	}
 
 	ctr, err := controller.New("controller", mgr,
 		controller.Options{Reconciler: &Controller{
-			Client:        mgr.GetClient(),
-			Scheme:        mgr.GetScheme(),
-			DynamicClient: dynamicClient,
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
 		}})
 	if err != nil {
 		logrus.Errorf("failed to create controller: %v", err)
@@ -94,7 +92,7 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 
 	NewMetrics()
 
-	logrus.Infof("Custom Prometheus Metrics registered")
+	logrus.Infof("Prometheus Metrics registered")
 
 	// Create a Kubernetes client for low-level work
 	clientset, err = kubernetes.NewForConfig(mgr.GetConfig())
@@ -102,15 +100,17 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		return err
 	}
 
-	//// Fetch provider id
-	//_ = provider.GetProviderId(clientset)
-
-	discoveryClient, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	dc, err = discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
 	if err != nil {
 		return err
 	}
 
-	if err := c.WatchResources(discoveryClient, dynamicClient, requiredLabel); err != nil {
+	dynamicClient, err = dynamic.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		return err
+	}
+
+	if err := c.WatchResources(dc, dynamicClient, requiredLabel); err != nil {
 		return err
 	}
 
@@ -118,49 +118,25 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 }
 
 func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstructured) (reconcile.Result, error) {
-	// THIS FUNC WILL ONLY BE TRIGGERED ON A RESOURCE CHANGE
-	//TODO Changes that need to be done here once moved to standalone function
-	// Refetch the resource (to get most up to date)
-	// Update map with latest version
-	// Reconcile label to ensure it should still be watched, if not then delete from map
-	// Build notification URL
-	// Reconcile notification stuff
-	// Reconcile cadence
-g	WatchingResourcesCount.Set(float64(helpers.GetMapLength(&resources)))
+	WatchingResourcesCount.Set(float64(helpers.GetMapLength(&resources)))
 
 	res, found := helpers.RetrieveResource(namespacedName(resource), &resources)
 	if !found {
 		logrus.Errorf("failed to retrieve resource from map: %v", namespacedName(resource))
 		return reconcile.Result{}, nil
 	}
-	gvr := helpers.GVRFromUnstructured(res)
 
-	logrus.Infof("reconciling %s with importance of %s", namespacedName(&res), res.GetLabels()[watchingLabel])
+	logrus.Infof("Reconciling labels for %s", namespacedName(resource))
+	priority, err := c.ReconcileLabels(ctx, res)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	// We know priority label is configured so we can log that reconcile is occurring
+	logrus.Infof("reconciling %s with importance of %s", namespacedName(&res), res.GetLabels()[priorityLabel])
 
 	// Update the map with the latest resource version
 	helpers.UpdateMapWithResource(res, namespacedName(&res), &resources)
-
-	// If resource no longer has the label or if label is empty (no priority set) then delete it from the map
-	if value, labelExists := res.GetLabels()[watchingLabel]; !labelExists || value == "" {
-		resources.Delete(namespacedName(&res))
-		return reconcile.Result{}, nil
-	}
-
-	// Set priority level based on label - if invalid priority, default to low
-	priority := strings.ToLower(res.GetLabels()[watchingLabel])
-	if priority != "low" && priority != "medium" && priority != "high" {
-		logrus.Warnf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, res.GetName())
-		res.GetLabels()[watchingLabel] = "low"
-
-		labels := res.GetLabels()
-		labels[watchingLabel] = "low"
-		res.SetLabels(labels)
-		priority = "low"
-
-		if _, err := c.DynamicClient.Resource(gvr).Namespace(res.GetNamespace()).Update(ctx, &res, metav1.UpdateOptions{}); err != nil {
-			return reconcile.Result{}, err
-		}
-	}
 
 	// Get notification URL
 	url := provider.BuildNotificationURL(*clientset,
@@ -202,12 +178,89 @@ func namespacedName(resource *u.Unstructured) string {
 	return resource.GetNamespace() + "/" + resource.GetName()
 }
 
+func parseNamespacedName(namespacedName string) (string, string, error) {
+	parts := strings.Split(namespacedName, ".")
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("invalid namespaced name: %s", namespacedName)
+	}
+	return parts[0], parts[1], nil
+}
+
 func sendSlackNotification(name string, resource *u.Unstructured, url string, priority string, secret v1.Secret, configMap v1.ConfigMap) error {
 	if err := slack.SendEvent(*resource, url, priority, secret, configMap); err != nil {
 		return err
 	}
 	lastNotificationTimes.Store(name, time.Now())
 	return nil
+}
+
+func (c *Controller) ReconcileLabels(ctx context.Context, resource u.Unstructured) (string, error) {
+	gvr := helpers.GVRFromUnstructured(resource)
+
+	// If resource no longer has the label or if label is empty (no priority set) then delete it from the map
+	if value, labelExists := resource.GetLabels()[priorityLabel]; !labelExists || value == "" {
+		resources.Delete(namespacedName(&resource))
+		return "", nil
+	}
+
+	// Set priority level based on label - if invalid priority, default to low
+	priority := strings.ToLower(resource.GetLabels()[priorityLabel])
+	if priority != "low" && priority != "medium" && priority != "high" {
+		logrus.Warnf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, resource.GetName())
+		resource.GetLabels()[priorityLabel] = "low"
+
+		labels := resource.GetLabels()
+		labels[priorityLabel] = "low"
+		resource.SetLabels(labels)
+		priority = "low"
+
+		if _, err := dynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Update(ctx, &resource, metav1.UpdateOptions{}); err != nil {
+			return "", err
+		}
+		return priority, nil
+	}
+
+	owner := resource.GetLabels()[ownerLabel]
+	// check if owner value is in format of ip address
+	if net.ParseIP(owner) != nil {
+		return priority, nil
+	}
+	ownerNamespace, ownerName, err := parseNamespacedName(owner)
+	if err != nil {
+		logrus.Errorf("failed to parse namespaced name: %v", err)
+		return "", err
+	}
+
+	if owner != "" {
+		// Get owner resource by name and namespace
+		ownerResources, err := helpers.DiscoverClusterGRVsByNamespacedName(dc, dynamicClient, ownerNamespace, ownerName)
+		if err != nil {
+			logrus.Errorf("failed to discover owner resource: %v", err)
+			return "", err
+		}
+		if len(ownerResources) == 0 {
+			logrus.Errorf("owner resource not found")
+			return "", fmt.Errorf("owner resource not found")
+		}
+		ownerResource := ownerResources[0]
+
+		// Extract IP from owner
+		ownerIP := ownerResource.Object["status"].(map[string]interface{})["podIP"].(string)
+		logrus.Infof("owner ip: %s", ownerIP)
+
+		// Set the IP to be the label's value
+		labels := resource.GetLabels()
+		labels[ownerLabel] = ownerIP
+		resource.SetLabels(labels)
+
+		// Update resource with new label
+		if _, err := dynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Update(ctx, &resource, metav1.UpdateOptions{}); err != nil {
+			logrus.Errorf("failed to update resource: %v", err)
+			return "", err
+		}
+	}
+
+	return priority, nil
 }
 
 func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url string, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
@@ -291,12 +344,12 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 }
 
 func (c *Controller) discoverResourcesAndSetWatch(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) {
-	unstructuredItems, err := helpers.DiscoverClusterGRVs(context.TODO(), discoveryClient, dynamicClient, requiredLabel)
+	unstructuredItems, err := helpers.DiscoverClusterGRVsByLabel(discoveryClient, dynamicClient, requiredLabel)
 	if err != nil {
 		logrus.Errorf("error discovering cluster resources: %v", err)
 		return
 	}
-
+	logrus.Infof("discovered %d resources", len(unstructuredItems))
 	for _, item := range unstructuredItems {
 		c.updateMapAndWatchResource(dynamicClient, item)
 	}
@@ -347,6 +400,7 @@ func (c *Controller) handleModifiedEvent(event watch.Event, item u.Unstructured,
 }
 
 func (c *Controller) triggerResourceReconcile(item u.Unstructured, namespacedName string) {
+	logrus.Warnf("Triggering Reconcile for %s", namespacedName)
 	_, err := c.resourceReconcile(context.TODO(), &item)
 	if err != nil {
 		return
