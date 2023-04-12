@@ -75,7 +75,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	requiredLabelQuery := ".metadata.labels | has(\"app.heimdall.io/watching\")"
+	requiredLabelQuery := ".metadata.labels | has(\"app.heimdall.io\")"
 
 	if err = (&controllers.Controller{
 		Client: mgr.GetClient(),
