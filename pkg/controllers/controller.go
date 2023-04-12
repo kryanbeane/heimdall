@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"github.com/gertd/go-pluralize"
+	"github.com/heimdall-controller/heimdall/pkg/controllers/helpers"
 	"github.com/heimdall-controller/heimdall/pkg/slack"
 	"github.com/heimdall-controller/heimdall/pkg/slack/provider"
 	gcp2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/gcp"
@@ -120,15 +121,6 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 	return nil
 }
 
-func getMapLength(m *sync.Map) int {
-	var count int
-	m.Range(func(_, _ interface{}) bool {
-		count++
-		return true
-	})
-	return count
-}
-
 func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstructured) (reconcile.Result, error) {
 	// THIS FUNC WILL ONLY BE TRIGGERED ON A RESOURCE CHANGE
 	//TODO Changes that need to be done here once moved to standalone function
@@ -139,9 +131,9 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 	// Reconcile notification stuff
 	// Reconcile cadence
 	logrus.Info("IM A TEST")
-	WatchingResourcesCount.Set(float64(getMapLength(&resources)))
+	WatchingResourcesCount.Set(float64(helpers.GetMapLength(&resources)))
 
-	res, found := c.RetrieveResource(namespacedName(resource), &resources)
+	res, found := helpers.RetrieveResource(namespacedName(resource), &resources)
 	if !found {
 		logrus.Errorf("failed to retrieve resource from map: %v", namespacedName(resource))
 		return reconcile.Result{}, nil
@@ -151,7 +143,7 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 	logrus.Infof("reconciling %s with importance of %s", namespacedName(&res), res.GetLabels()[watchingLabel])
 
 	// Update the map with the latest resource version
-	c.UpdateMapWithResource(res, &resources)
+	helpers.UpdateMapWithResource(res, namespacedName(&res), &resources)
 
 	// If resource no longer has the label or if label is empty (no priority set) then delete it from the map
 	if value, labelExists := res.GetLabels()[watchingLabel]; !labelExists || value == "" {
@@ -243,32 +235,6 @@ func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url 
 	return nil
 }
 
-func (c *Controller) RetrieveOrStoreResource(key string, resource u.Unstructured, m *sync.Map) (u.Unstructured, bool) {
-	if res, loaded := m.LoadOrStore(key, resource); !loaded {
-		return resource, true
-	} else if loaded {
-		return res.(u.Unstructured), true
-	} else {
-		return u.Unstructured{}, false
-	}
-}
-
-func (c *Controller) RetrieveResource(key string, m *sync.Map) (u.Unstructured, bool) {
-	if res, ok := m.Load(key); ok {
-		return res.(u.Unstructured), true
-	} else {
-		return u.Unstructured{}, true
-	}
-}
-
-func (c *Controller) UpdateMapWithResource(resource u.Unstructured, m *sync.Map) {
-	m.Store(namespacedName(&resource), resource)
-}
-
-func (c *Controller) DeleteResource(key string, m *sync.Map) {
-	m.Delete(key)
-}
-
 func GVRFromUnstructured(o u.Unstructured) schema.GroupVersionResource {
 	resource := strings.ToLower(pluralize.NewClient().Plural(o.GetObjectKind().GroupVersionKind().Kind))
 	return schema.GroupVersionResource{Group: o.GetObjectKind().GroupVersionKind().Group, Version: o.GetObjectKind().GroupVersionKind().Version, Resource: resource}
@@ -349,7 +315,7 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 
 				for _, item := range unstructuredItems {
 					// If not in the map; add it. if in the map; update it.
-					c.UpdateMapWithResource(item, &resources)
+					helpers.UpdateMapWithResource(item, namespacedName(&item), &resources)
 
 					item := item
 					namespacedName := namespacedName(&item)
@@ -376,7 +342,7 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 									continue
 								}
 								// Update the resource in the map
-								c.UpdateMapWithResource(*unstructuredObj, &resources)
+								helpers.UpdateMapWithResource(*unstructuredObj, namespacedName, &resources)
 
 								logrus.Infof("Object %s has been modified", namespacedName)
 
@@ -387,7 +353,7 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 									}
 
 									// Reconcile has completed so we can now delete the resource from the map
-									c.DeleteResource(namespacedName, &resources)
+									helpers.DeleteResource(namespacedName, &resources)
 								}
 							}
 						}
