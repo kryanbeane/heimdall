@@ -8,7 +8,9 @@ import (
 	"strings"
 )
 
-func DiscoverClusterGRVs(ctx context.Context, dc *discovery.DiscoveryClient, di dynamic.Interface, requiredLabelQuery string) ([]u.Unstructured, error) {
+type discoverClusterGRVsFunc func(di dynamic.Interface, ctx context.Context, g, v, r, query string, namespace string, name string) ([]u.Unstructured, error)
+
+func discoverClusterGRVs(dc *discovery.DiscoveryClient, di dynamic.Interface, query string, namespace string, name string, discoverFunc discoverClusterGRVsFunc) ([]u.Unstructured, error) {
 	var g, v, r string
 	var items []u.Unstructured
 
@@ -38,8 +40,7 @@ func DiscoverClusterGRVs(ctx context.Context, dc *discovery.DiscoveryClient, di 
 				if !strings.Contains(resource.Name, "/") {
 					r = resource.Name
 
-					// Get a list of all objects in the group/version/resource in json with the label
-					jqItems, err := GetResourcesByJq(di, ctx, g, v, r, requiredLabelQuery)
+					jqItems, err := discoverFunc(di, context.Background(), g, v, r, query, namespace, name)
 					if err != nil {
 						continue
 					}
@@ -51,4 +52,20 @@ func DiscoverClusterGRVs(ctx context.Context, dc *discovery.DiscoveryClient, di 
 	}
 
 	return items, nil
+}
+
+func DiscoverClusterGRVsByLabel(dc *discovery.DiscoveryClient, di dynamic.Interface, requiredLabelQuery string) ([]u.Unstructured, error) {
+	discoverFunc := func(di dynamic.Interface, ctx context.Context, g, v, r, query, namespace, name string) ([]u.Unstructured, error) {
+		return GetResourcesByJq(di, ctx, g, v, r, query, namespace, name)
+	}
+
+	return discoverClusterGRVs(dc, di, requiredLabelQuery, "", "", discoverFunc)
+}
+
+func DiscoverClusterGRVsByNamespacedName(dc *discovery.DiscoveryClient, di dynamic.Interface, namespace string, name string) ([]u.Unstructured, error) {
+	discoverFunc := func(di dynamic.Interface, ctx context.Context, g, v, r, query, namespace, name string) ([]u.Unstructured, error) {
+		return GetResourcesByJq(di, ctx, g, v, r, query, namespace, name)
+	}
+
+	return discoverClusterGRVs(dc, di, "", namespace, name, discoverFunc)
 }
