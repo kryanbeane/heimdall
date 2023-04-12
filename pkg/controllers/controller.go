@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"net"
+	"os/exec"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -194,6 +195,18 @@ func sendSlackNotification(name string, resource *u.Unstructured, url string, pr
 	return nil
 }
 
+func installAdmissionController() error {
+	// use the install script to install the admission controller in the manifests directory
+	cmd := exec.Command("bash", "-c", "./deploy.sh")
+	cmd.Dir = "template/scripts"
+
+	// execute the command
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (c *Controller) ReconcileLabels(ctx context.Context, resource u.Unstructured) (string, error) {
 	gvr := helpers.GVRFromUnstructured(resource)
 
@@ -356,6 +369,16 @@ func (c *Controller) discoverResourcesAndSetWatch(discoveryClient *discovery.Dis
 }
 
 func (c *Controller) updateMapAndWatchResource(dynamicClient dynamic.Interface, item u.Unstructured) {
+	// This function being triggered means resources with the label were found. This implies that the dev has
+	// added the label to a resource and so we can now create the admission webhook.
+
+	err := installAdmissionController()
+	if err != nil {
+		logrus.Errorf("error installing admission controller: %v", err)
+		return
+	}
+
+	logrus.Infof("installed admission controller")
 	// If not in the map; add it. if in the map; update it.
 	helpers.UpdateMapWithResource(item, namespacedName(&item), &resources)
 
