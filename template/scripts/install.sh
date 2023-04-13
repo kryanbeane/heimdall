@@ -8,5 +8,5 @@ rm -rf heimdall-admission
 
 kubectl create ns heimdall
 
-./template/scripts/gen-secret.sh
+./gen-secret.sh
 

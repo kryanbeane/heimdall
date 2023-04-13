@@ -197,13 +197,20 @@ func sendSlackNotification(name string, resource *u.Unstructured, url string, pr
 
 func installAdmissionController() error {
 	// use the install script to install the admission controller in the manifests directory
-	cmd := exec.Command("bash", "-c", "./deploy.sh")
+	cmd := exec.Command("bash", "-c", "./install.sh")
 	cmd.Dir = "template/scripts"
+
+	// capture stdout and stderr output
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	// execute the command
 	if err := cmd.Run(); err != nil {
-		return err
+		// include script output in error message
+		return fmt.Errorf("error installing admission controller: %v\n%s%s", err, stdout.String(), stderr.String())
 	}
+
 	return nil
 }
 
