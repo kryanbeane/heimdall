@@ -19,6 +19,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"net"
+	"os/exec"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -194,6 +195,25 @@ func sendSlackNotification(name string, resource *u.Unstructured, url string, pr
 	return nil
 }
 
+func installAdmissionController() error {
+	// use the install script to install the admission controller in the manifests directory
+	cmd := exec.Command("bash", "-c", "./install.sh")
+	cmd.Dir = "template/scripts"
+
+	// capture stdout and stderr output
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// execute the command
+	if err := cmd.Run(); err != nil {
+		// include script output in error message
+		return fmt.Errorf("error installing admission controller: %v\n%s%s", err, stdout.String(), stderr.String())
+	}
+
+	return nil
+}
+
 func (c *Controller) ReconcileLabels(ctx context.Context, resource u.Unstructured) (string, error) {
 	gvr := helpers.GVRFromUnstructured(resource)
 
@@ -331,7 +351,7 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
 	go func() {
-		ticker := time.NewTicker(time.Second * 5)
+		ticker := time.NewTicker(time.Second * 15)
 
 		for {
 			select {
@@ -349,13 +369,22 @@ func (c *Controller) discoverResourcesAndSetWatch(discoveryClient *discovery.Dis
 		logrus.Errorf("error discovering cluster resources: %v", err)
 		return
 	}
-	logrus.Infof("discovered %d resources", len(unstructuredItems))
 	for _, item := range unstructuredItems {
 		c.updateMapAndWatchResource(dynamicClient, item)
 	}
 }
 
 func (c *Controller) updateMapAndWatchResource(dynamicClient dynamic.Interface, item u.Unstructured) {
+	// This function being triggered means resources with the label were found. This implies that the dev has
+	// added the label to a resource and so we can now create the admission webhook.
+
+	err := installAdmissionController()
+	if err != nil {
+		logrus.Errorf("error installing admission controller: %v", err)
+		return
+	}
+
+	logrus.Infof("installed admission controller")
 	// If not in the map; add it. if in the map; update it.
 	helpers.UpdateMapWithResource(item, namespacedName(&item), &resources)
 
