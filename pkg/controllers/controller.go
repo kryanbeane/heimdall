@@ -351,7 +351,7 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
 	go func() {
-		ticker := time.NewTicker(time.Second * 5)
+		ticker := time.NewTicker(time.Second * 15)
 
 		for {
 			select {
@@ -369,7 +369,6 @@ func (c *Controller) discoverResourcesAndSetWatch(discoveryClient *discovery.Dis
 		logrus.Errorf("error discovering cluster resources: %v", err)
 		return
 	}
-	logrus.Infof("discovered %d resources", len(unstructuredItems))
 	for _, item := range unstructuredItems {
 		c.updateMapAndWatchResource(dynamicClient, item)
 	}
