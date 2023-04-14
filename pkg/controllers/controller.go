@@ -378,11 +378,11 @@ func (c *Controller) updateMapAndWatchResource(dynamicClient dynamic.Interface, 
 	// This function being triggered means resources with the label were found. This implies that the dev has
 	// added the label to a resource and so we can now create the admission webhook.
 
-	err := installAdmissionController()
-	if err != nil {
-		logrus.Errorf("error installing admission controller: %v", err)
-		return
-	}
+	//err := installAdmissionController()
+	//if err != nil {
+	//	logrus.Errorf("error installing admission controller: %v", err)
+	//	return
+	//}
 
 	logrus.Infof("installed admission controller")
 	// If not in the map; add it. if in the map; update it.
