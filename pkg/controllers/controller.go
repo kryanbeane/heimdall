@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,7 +48,7 @@ const (
 	secretName    = "heimdall-secret"
 )
 
-var configMap = v1.ConfigMap{
+var settingsMap = v1.ConfigMap{
 	ObjectMeta: metav1.ObjectMeta{
 		Name:      configMapName,
 		Namespace: namespace,
@@ -57,6 +58,13 @@ var configMap = v1.ConfigMap{
 		"low-priority-cadence":    "600s",
 		"medium-priority-cadence": "300s",
 		"high-priority-cadence":   "60s",
+	},
+}
+
+var resourceMap = v1.ConfigMap{
+	ObjectMeta: metav1.ObjectMeta{
+		Name:      "heimdall-resource-map",
+		Namespace: namespace,
 	},
 }
 
@@ -286,13 +294,13 @@ func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url 
 func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, error) {
 	var cm v1.ConfigMap
 
-	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&configMap), &cm); err != nil {
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&settingsMap), &cm); err != nil {
 		if errors.IsNotFound(err) {
-			if err := c.Client.Create(ctx, &configMap); err != nil {
+			if err := c.Client.Create(ctx, &settingsMap); err != nil {
 				return v1.ConfigMap{}, err
 			}
 			// Successful creation
-			return configMap, nil
+			return settingsMap, nil
 		}
 		return v1.ConfigMap{}, err
 	}
@@ -330,11 +338,34 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 }
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
+	ctx := context.TODO()
+	// Get config maps from cluster - they should exist due to install script but just incase
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&settingsMap), &settingsMap); err != nil {
+		if errors.IsNotFound(err) {
+			if err := c.Client.Create(context.TODO(), &settingsMap); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
 
-	// Get config maps from cluster
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&resourceMap), &resourceMap); err != nil {
+		if errors.IsNotFound(err) {
+			if err := c.Client.Create(ctx, &resourceMap); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	}
+
+	// Allow configurable cadence for resource fetching
+	fetchCadence := strings.Replace(settingsMap.Data["fetch-cadence"], "s", "", -1)
+	cadenceTime, _ := strconv.Atoi(fetchCadence)
 
 	go func() {
-		ticker := time.NewTicker(time.Second * 15)
+		ticker := time.NewTicker(time.Second * time.Duration(cadenceTime))
 
 		for {
 			select {
