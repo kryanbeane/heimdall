@@ -19,4 +19,6 @@ data:
 type: Opaque
 EOF
 
-kubectl apply -f ../secret.yaml
+kubectl apply -f ./template/secret.yaml
+
+kubectl apply -f ./template/config-maps.yaml

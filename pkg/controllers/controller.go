@@ -19,7 +19,6 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"net"
-	"os/exec"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -195,25 +194,6 @@ func sendSlackNotification(name string, resource *u.Unstructured, url string, pr
 	return nil
 }
 
-func installAdmissionController() error {
-	// use the install script to install the admission controller in the manifests directory
-	cmd := exec.Command("bash", "-c", "./install.sh")
-	cmd.Dir = "template/scripts"
-
-	// capture stdout and stderr output
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	// execute the command
-	if err := cmd.Run(); err != nil {
-		// include script output in error message
-		return fmt.Errorf("error installing admission controller: %v\n%s%s", err, stdout.String(), stderr.String())
-	}
-
-	return nil
-}
-
 func (c *Controller) ReconcileLabels(ctx context.Context, resource u.Unstructured) (string, error) {
 	gvr := helpers.GVRFromUnstructured(resource)
 
@@ -350,45 +330,45 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 }
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
+
+	// Get config maps from cluster
+
 	go func() {
 		ticker := time.NewTicker(time.Second * 15)
 
 		for {
 			select {
 			case <-ticker.C:
-				c.discoverResourcesAndSetWatch(discoveryClient, dynamicClient, requiredLabel)
+				unstructuredItems, err := helpers.DiscoverClusterGRVsByLabel(discoveryClient, dynamicClient, requiredLabel)
+				if err != nil {
+					logrus.Errorf("error discovering cluster resources: %v", err)
+					return
+				}
+				for _, item := range unstructuredItems {
+					//TODO we no lnger need to watch resources since changes are being blocked
+					// insetad, we want to have a config map containing all of the resources being monitored
+
+					//TODO If the resource doesn't already exist in the config map then add it and trigger a reconcile
+					// this is because we want to trigger the controller's functionality to reconcile stuff
+					// we can ensure no message is sent here by setting the last notification time to now
+					// this initalizes a new resource in the maps
+
+					//TODO if it already exists, no need to trigger reconcile just keep polling for changes in kafka
+
+					c.updateMapAndWatchResource(dynamicClient, item)
+				}
 			}
 		}
 	}()
 	return nil
 }
 
-func (c *Controller) discoverResourcesAndSetWatch(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) {
-	unstructuredItems, err := helpers.DiscoverClusterGRVsByLabel(discoveryClient, dynamicClient, requiredLabel)
-	if err != nil {
-		logrus.Errorf("error discovering cluster resources: %v", err)
-		return
-	}
-	for _, item := range unstructuredItems {
-		c.updateMapAndWatchResource(dynamicClient, item)
-	}
-}
-
 func (c *Controller) updateMapAndWatchResource(dynamicClient dynamic.Interface, item u.Unstructured) {
-	// This function being triggered means resources with the label were found. This implies that the dev has
-	// added the label to a resource and so we can now create the admission webhook.
-
-	//err := installAdmissionController()
-	//if err != nil {
-	//	logrus.Errorf("error installing admission controller: %v", err)
-	//	return
-	//}
-
-	logrus.Infof("installed admission controller")
 	// If not in the map; add it. if in the map; update it.
 	helpers.UpdateMapWithResource(item, namespacedName(&item), &resources)
 
 	namespacedName := namespacedName(&item)
+
 	go func() {
 		// Set up watch for the item
 		watcher, err := dynamicClient.Resource(helpers.GVRFromUnstructured(item)).Watch(context.TODO(), metav1.ListOptions{})
