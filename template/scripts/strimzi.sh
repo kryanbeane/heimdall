@@ -3,21 +3,32 @@
 NAMESPACE="heimdall"
 KAFKA_YAML="./template/kafka.yaml"
 
-echo "Creating Strimzi Operator and Kafka Cluster in namespace $NAMESPACE..."
-if ! kubectl create -f "https://strimzi.io/install/latest?namespace=$NAMESPACE" -n "$NAMESPACE" 2>&1 | grep -q "already exists"; then
-    echo "Error creating Strimzi Operator" >&2
-    exit 1
+echo "Checking if Strimzi Operator already exists..."
+if kubectl get deployment strimzi-cluster-operator -n "$NAMESPACE" >/dev/null 2>&1; then
+    echo "Strimzi Operator already exists in namespace $NAMESPACE"
+else
+    echo "Creating Strimzi Operator in namespace $NAMESPACE..."
+    if ! kubectl create -f "https://strimzi.io/install/latest?namespace=$NAMESPACE" -n "$NAMESPACE"; then
+        echo "Error creating Strimzi Operator" >&2
+        exit 1
+    fi
 fi
 
-if ! kubectl apply -f "$KAFKA_YAML" -n "$NAMESPACE"; then
-    echo "Error creating Kafka Cluster" >&2
-    exit 1
-fi
+echo "Checking if Kafka Cluster already exists..."
+if kubectl get kafka heimdall-kafka-cluster -n "$NAMESPACE" >/dev/null 2>&1; then
+    echo "Kafka Cluster already exists in namespace $NAMESPACE"
+else
+    echo "Creating Kafka Cluster in namespace $NAMESPACE..."
+    if ! kubectl apply -f "$KAFKA_YAML" -n "$NAMESPACE"; then
+        echo "Error creating Kafka Cluster" >&2
+        exit 1
+    fi
 
-echo "Waiting for Kafka Cluster to be ready..."
-if ! kubectl wait kafka/heimdall-kafka-cluster --for=condition=Ready --timeout=300s -n "$NAMESPACE"; then
-    echo "Error waiting for Kafka Cluster to be ready" >&2
-    exit 1
+    echo "Waiting for Kafka Cluster to be ready..."
+    if ! kubectl wait kafka/heimdall-kafka-cluster --for=condition=Ready --timeout=300s -n "$NAMESPACE"; then
+        echo "Error waiting for Kafka Cluster to be ready" >&2
+        exit 1
+    fi
 fi
 
 echo "Strimzi Operator and Kafka Cluster initialized in namespace $NAMESPACE"
