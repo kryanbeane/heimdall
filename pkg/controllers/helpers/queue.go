@@ -1,14 +1,21 @@
 package helpers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	kafka "github.com/Shopify/sarama"
 	"github.com/sirupsen/logrus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"strings"
 )
 
 var (
-	heimdallTopic = "heimdall-topic"
+	heimdallTopic    = "heimdall-topic"
+	kafkaClusterName = "heimdall-kafka-cluster"
+	namespace        = "heimdall"
 )
 
 type ResourceDetails struct {
@@ -17,6 +24,23 @@ type ResourceDetails struct {
 	Kind      string
 	Group     string
 	Version   string
+}
+
+func InitializeKafkaConsumption() error {
+	// Get Kafka broker list
+	brokerList, err := getBrokerList(namespace, kafkaClusterName)
+	if err != nil {
+		logrus.Errorf("failed to get broker list: %v", err)
+		return err
+	}
+
+	logrus.Infof("retrieved Kafka broker address %s", brokerList)
+	err = ConsumeKafkaMessages(brokerList, heimdallTopic)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func ConsumeKafkaMessages(brokerList []string, topic string) error {
@@ -30,7 +54,7 @@ func ConsumeKafkaMessages(brokerList []string, topic string) error {
 	}
 	defer consumer.Close()
 
-	err = CreateKafkaTopic(*consumerConfig, brokerList)
+	err = createKafkaTopic(*consumerConfig, brokerList)
 	if err != nil {
 		return err
 	}
@@ -70,7 +94,7 @@ func deconstructMessage(msg string) (*ResourceDetails, error) {
 	return &resourceDetails, nil
 }
 
-func CreateKafkaTopic(config kafka.Config, brokerList []string) error {
+func createKafkaTopic(config kafka.Config, brokerList []string) error {
 	admin, err := kafka.NewClusterAdmin(brokerList, &config)
 	if err != nil {
 		return err
@@ -95,4 +119,36 @@ func CreateKafkaTopic(config kafka.Config, brokerList []string) error {
 	}
 
 	return nil
+}
+
+func getBrokerList(namespace string, kafkaClusterName string) ([]string, error) {
+	// Create Kubernetes clientset
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get list of Kafka broker services
+	svcList, err := clientset.CoreV1().Services(namespace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("strimzi.io/cluster=%s,strimzi.io/kind=Kafka", kafkaClusterName),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Create list of broker addresses in format "broker-address:broker-port"
+	brokerList := make([]string, len(svcList.Items))
+	for i, svc := range svcList.Items {
+		if svc.Spec.ClusterIP != "None" && strings.Contains(svc.Name, "bootstrap") {
+			brokerAddress := fmt.Sprintf("%s:%d", svc.Spec.ClusterIP, 9092)
+			brokerAddress = strings.Replace(brokerAddress, " ", "", -1)
+			brokerList[i] = brokerAddress
+		}
+	}
+
+	return brokerList, nil
 }

@@ -377,6 +377,10 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 	}
 
 	// create topic and start consuming
+	err := helpers.ConsumeKafkaMessages(ctx, c.Client, settingsMap, resourceMap)
+	if err != nil {
+		return err
+	}
 
 	// Allow configurable cadence for resource fetching
 	fetchCadence := strings.Replace(settingsMap.Data["fetch-cadence"], "s", "", -1)
