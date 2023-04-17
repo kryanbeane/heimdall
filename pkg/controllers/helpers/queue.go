@@ -35,7 +35,7 @@ func InitializeKafkaConsumption() error {
 	}
 
 	logrus.Infof("retrieved Kafka broker address %s", brokerList)
-	err = ConsumeKafkaMessages(brokerList, heimdallTopic)
+	err = consumeKafkaMessages(brokerList, heimdallTopic)
 	if err != nil {
 		return err
 	}
@@ -43,11 +43,11 @@ func InitializeKafkaConsumption() error {
 	return nil
 }
 
-func ConsumeKafkaMessages(brokerList []string, topic string) error {
+func consumeKafkaMessages(brokerList []string, topic string) error {
 	consumerConfig := kafka.NewConfig()
 	consumerConfig.Consumer.Return.Errors = true
 
-	// Connect to Kafka broker
+	// Connect to Kafka broker with new consumer
 	consumer, err := kafka.NewConsumer(brokerList, consumerConfig)
 	if err != nil {
 		return err
