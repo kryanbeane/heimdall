@@ -3,6 +3,7 @@ module github.com/heimdall-controller/heimdall
 go 1.19
 
 require (
+	github.com/Shopify/sarama v1.38.1
 	github.com/gertd/go-pluralize v0.2.1
 	github.com/itchyny/gojq v0.12.12
 	github.com/onsi/ginkgo/v2 v2.9.2
@@ -23,7 +24,6 @@ require (
 )
 
 require (
-	github.com/Shopify/sarama v1.38.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect

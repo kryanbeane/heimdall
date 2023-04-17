@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	kafka "github.com/Shopify/sarama"
+
 	"github.com/heimdall-controller/heimdall/pkg/controllers/helpers"
 	"github.com/heimdall-controller/heimdall/pkg/slack"
 	"github.com/heimdall-controller/heimdall/pkg/slack/provider"
@@ -100,8 +102,6 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 
 	NewMetrics()
 
-	logrus.Infof("Prometheus Metrics registered")
-
 	// Create a Kubernetes client for low-level work
 	clientset, err = kubernetes.NewForConfig(mgr.GetConfig())
 	if err != nil {
@@ -156,12 +156,21 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 	)
 	logrus.Infof("notification url: %s", url)
 
-	cm, err := c.ReconcileConfigMap(ctx)
+	settings, err := c.ReconcileSettingsConfigMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
-	if cm.Data == nil {
-		logrus.Warn("config map not configured, please configure Heimdall config map")
+	if settings.Data == nil {
+		logrus.Warn("settings config map not configured, please configure Heimdall config map")
+		return reconcile.Result{}, nil
+	}
+
+	_, err = c.ReconcileResourcesMap(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	if settings.Data == nil {
+		logrus.Warn("resource config map is empty")
 		return reconcile.Result{}, nil
 	}
 
@@ -174,7 +183,7 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 		return reconcile.Result{}, nil
 	}
 
-	err = c.ReconcileNotificationCadence(&res, url, priority, cm, secret)
+	err = c.ReconcileNotificationCadence(&res, url, priority, settings, secret)
 	if err != nil {
 		return ctrl.Result{}, nil
 	}
@@ -291,7 +300,7 @@ func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url 
 	return nil
 }
 
-func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, error) {
+func (c *Controller) ReconcileSettingsConfigMap(ctx context.Context) (v1.ConfigMap, error) {
 	var cm v1.ConfigMap
 
 	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&settingsMap), &cm); err != nil {
@@ -311,6 +320,24 @@ func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, erro
 	}
 
 	// Successfully retrieved configmap
+	return cm, nil
+}
+
+func (c *Controller) ReconcileResourcesMap(ctx context.Context) (v1.ConfigMap, error) {
+	var cm v1.ConfigMap
+
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&resourceMap), &cm); err != nil {
+		if errors.IsNotFound(err) {
+			if err := c.Client.Create(ctx, &resourceMap); err != nil {
+				return v1.ConfigMap{}, err
+			}
+			// Successful creation
+			return resourceMap, nil
+		}
+		return v1.ConfigMap{}, err
+	}
+
+	// Successfully retrieved or created configmap
 	return cm, nil
 }
 
@@ -370,19 +397,21 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 		for {
 			select {
 			case <-ticker.C:
+
 				unstructuredItems, err := helpers.DiscoverClusterGRVsByLabel(discoveryClient, dynamicClient, requiredLabel)
 				if err != nil {
 					logrus.Errorf("error discovering cluster resources: %v", err)
 					return
 				}
+
 				for _, item := range unstructuredItems {
 					//TODO we no lnger need to watch resources since changes are being blocked
-					// insetad, we want to have a config map containing all of the resources being monitored
+					// instead, we want to have a config map containing all of the resources being monitored
 
 					//TODO If the resource doesn't already exist in the config map then add it and trigger a reconcile
 					// this is because we want to trigger the controller's functionality to reconcile stuff
 					// we can ensure no message is sent here by setting the last notification time to now
-					// this initalizes a new resource in the maps
+					// this initializes a new resource in the maps
 
 					//TODO if it already exists, no need to trigger reconcile just keep polling for changes in kafka
 
@@ -392,6 +421,34 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 		}
 	}()
 	return nil
+}
+
+func consumeKafkaMessages(brokerList []string, topic string) error {
+	consumerConfig := kafka.NewConfig()
+	consumerConfig.Consumer.Return.Errors = true
+
+	// Connect to Kafka broker
+	consumer, err := kafka.NewConsumer(brokerList, consumerConfig)
+	if err != nil {
+		return err
+	}
+	defer consumer.Close()
+
+	// Subscribe to Kafka topic
+	partition, err := consumer.ConsumePartition(topic, 0, kafka.OffsetOldest)
+	if err != nil {
+		return err
+	}
+
+	// Consume Kafka messages
+	for {
+		select {
+		case msg := <-partition.Messages():
+			fmt.Printf("Received message: %v\n", string(msg.Value))
+		case err := <-partition.Errors():
+			fmt.Printf("Error while consuming message: %v\n", err)
+		}
+	}
 }
 
 func (c *Controller) updateMapAndWatchResource(dynamicClient dynamic.Interface, item u.Unstructured) {
