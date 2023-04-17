@@ -125,10 +125,13 @@ func getBrokerList(namespace string, kafkaClusterName string) ([]string, error) 
 	// Create Kubernetes clientset
 	config, err := rest.InClusterConfig()
 	if err != nil {
+		logrus.Errorf("Failed to create in-cluster config: %v", err)
 		return nil, err
 	}
+
 	clientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
+		logrus.Errorf("Failed to create clientset: %v", err)
 		return nil, err
 	}
 

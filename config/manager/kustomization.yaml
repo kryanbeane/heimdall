@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: kryanbeane/heimdall
-  newTag: dev
+  newTag: latest

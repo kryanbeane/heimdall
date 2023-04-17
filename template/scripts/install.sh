@@ -13,6 +13,6 @@ rm -rf heimdall-admission
 
 echo "Installing Heimdall"
 
-kubectl apply -f ./template/heimdall.yaml
+make deploy IMG=kryanbeane/heimdall:latest
 
 ./template/scripts/gen-configs.sh

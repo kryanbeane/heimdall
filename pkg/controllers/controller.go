@@ -24,7 +24,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +58,7 @@ var settingsMap = v1.ConfigMap{
 		"low-priority-cadence":    "600s",
 		"medium-priority-cadence": "300s",
 		"high-priority-cadence":   "60s",
+		"fetch-cadence":           "10s",
 	},
 }
 
@@ -87,7 +87,6 @@ var lastNotificationTimes = sync.Map{}
 
 // InitializeController Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel string) error {
-
 	ctr, err := controller.New("controller", mgr,
 		controller.Options{Reconciler: &Controller{
 			Client: mgr.GetClient(),
@@ -97,7 +96,8 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		logrus.Errorf("failed to create controller: %v", err)
 		return err
 	}
-	logrus.Infof("Initialized Heimdall controller: %s", ctr)
+
+	logrus.Infof("Initialized Heimdall controller %s", ctr)
 
 	NewMetrics()
 
@@ -364,32 +364,9 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 }
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
-	ctx := context.TODO()
-	// Get config maps from cluster - they should exist due to install script but just in-case
-	settingsMap, err := c.ReconcileSettingsConfigMap(ctx)
-	if err != nil {
-		return err
-	}
-
-	resourceMap, err = c.ReconcileResourcesMap(ctx)
-	if err != nil {
-		return err
-	}
-
-	// create topic and start consuming in go routine so code can continue
-	go func() {
-		err = helpers.InitializeKafkaConsumption()
-		if err != nil {
-			return
-		}
-	}()
-
-	// Allow configurable cadence for resource fetching
-	fetchCadence := strings.Replace(settingsMap.Data["fetch-cadence"], "s", "", -1)
-	cadenceTime, _ := strconv.Atoi(fetchCadence)
 
 	go func() {
-		ticker := time.NewTicker(time.Second * time.Duration(cadenceTime))
+		ticker := time.NewTicker(time.Second * 5)
 
 		for {
 			select {
@@ -400,6 +377,34 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 					logrus.Errorf("error discovering cluster resources: %v", err)
 					return
 				}
+
+				ctx := context.TODO()
+				//Get config maps from cluster - they should exist due to install script but just in-case
+				settingsMap, err := c.ReconcileSettingsConfigMap(ctx)
+				if err != nil {
+					logrus.Errorf("I am failing %s", err)
+					return
+				}
+				logrus.Infof("settings map: %v", settingsMap)
+
+				resourceMap, err = c.ReconcileResourcesMap(ctx)
+				if err != nil {
+					logrus.Errorf("I am failing %s", err)
+					return
+				}
+				logrus.Infof("resource map: %v", resourceMap)
+
+				//create topic and start consuming in go routine so code can continue
+				go func() {
+					err := helpers.InitializeKafkaConsumption()
+					if err != nil {
+						return
+					}
+				}()
+
+				// Allow configurable cadence for resource fetching
+				//fetchCadence := strings.Replace(settingsMap.Data["fetch-cadence"], "s", "", -1)
+				//cadenceTime, _ := strconv.Atoi(fetchCadence)
 
 				for _, item := range unstructuredItems {
 					//TODO we no lnger need to watch resources since changes are being blocked
