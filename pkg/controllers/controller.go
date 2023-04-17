@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	kafka "github.com/Shopify/sarama"
-
 	"github.com/heimdall-controller/heimdall/pkg/controllers/helpers"
 	"github.com/heimdall-controller/heimdall/pkg/slack"
 	"github.com/heimdall-controller/heimdall/pkg/slack/provider"
@@ -48,6 +46,7 @@ const (
 	priorityLabel = "app.heimdall.io/priority"
 	ownerLabel    = "app.heimdall.io/owner"
 	secretName    = "heimdall-secret"
+	heimdallTopic = "heimdall-topic"
 )
 
 var settingsMap = v1.ConfigMap{
@@ -366,26 +365,18 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
 	ctx := context.TODO()
-	// Get config maps from cluster - they should exist due to install script but just incase
-	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&settingsMap), &settingsMap); err != nil {
-		if errors.IsNotFound(err) {
-			if err := c.Client.Create(context.TODO(), &settingsMap); err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
+	// Get config maps from cluster - they should exist due to install script but just in-case
+	settingsMap, err := c.ReconcileSettingsConfigMap(ctx)
+	if err != nil {
+		return err
 	}
 
-	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&resourceMap), &resourceMap); err != nil {
-		if errors.IsNotFound(err) {
-			if err := c.Client.Create(ctx, &resourceMap); err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
+	resourceMap, err = c.ReconcileResourcesMap(ctx)
+	if err != nil {
+		return err
 	}
+
+	// create topic and start consuming
 
 	// Allow configurable cadence for resource fetching
 	fetchCadence := strings.Replace(settingsMap.Data["fetch-cadence"], "s", "", -1)
@@ -421,34 +412,6 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 		}
 	}()
 	return nil
-}
-
-func consumeKafkaMessages(brokerList []string, topic string) error {
-	consumerConfig := kafka.NewConfig()
-	consumerConfig.Consumer.Return.Errors = true
-
-	// Connect to Kafka broker
-	consumer, err := kafka.NewConsumer(brokerList, consumerConfig)
-	if err != nil {
-		return err
-	}
-	defer consumer.Close()
-
-	// Subscribe to Kafka topic
-	partition, err := consumer.ConsumePartition(topic, 0, kafka.OffsetOldest)
-	if err != nil {
-		return err
-	}
-
-	// Consume Kafka messages
-	for {
-		select {
-		case msg := <-partition.Messages():
-			fmt.Printf("Received message: %v\n", string(msg.Value))
-		case err := <-partition.Errors():
-			fmt.Printf("Error while consuming message: %v\n", err)
-		}
-	}
 }
 
 func (c *Controller) updateMapAndWatchResource(dynamicClient dynamic.Interface, item u.Unstructured) {
