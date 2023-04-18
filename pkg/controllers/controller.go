@@ -3,7 +3,10 @@ package controllers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	kafka "github.com/Shopify/sarama"
+	"github.com/google/uuid"
 	"github.com/heimdall-controller/heimdall/pkg/controllers/helpers"
 	"github.com/heimdall-controller/heimdall/pkg/slack"
 	"github.com/heimdall-controller/heimdall/pkg/slack/provider"
@@ -14,10 +17,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	u "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"net"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,19 +39,29 @@ type Controller struct {
 	Scheme *runtime.Scheme
 }
 
+type ResourceDetails struct {
+	MessageID uuid.UUID
+	Name      string
+	Namespace string
+	Kind      string
+	Group     string
+	Version   string
+}
+
 // Reconcile Placeholder for now as we don't need a traditional reconcile loop
 func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	return reconcile.Result{}, nil
 }
 
 const (
-	configMapName   = "heimdall-settings"
-	resourceMapName = "heimdall-resources"
-	namespace       = "heimdall"
-	priorityLabel   = "app.heimdall.io/priority"
-	ownerLabel      = "app.heimdall.io/owner"
-	secretName      = "heimdall-secret"
-	heimdallTopic   = "heimdall-topic"
+	configMapName    = "heimdall-settings"
+	resourceMapName  = "heimdall-resources"
+	namespace        = "heimdall"
+	priorityLabel    = "app.heimdall.io/priority"
+	ownerLabel       = "app.heimdall.io/owner"
+	secretName       = "heimdall-secret"
+	heimdallTopic    = "heimdall-topic"
+	kafkaClusterName = "heimdall-kafka-cluster"
 )
 
 var settingsMap = v1.ConfigMap{
@@ -125,7 +140,7 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 	return nil
 }
 
-func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstructured) (reconcile.Result, error) {
+func (c *Controller) ResourceReconcile(ctx context.Context, resource *u.Unstructured) (reconcile.Result, error) {
 	WatchingResourcesCount.Set(float64(helpers.GetMapLength(&resources)))
 
 	res, found := helpers.RetrieveResource(namespacedName(resource), &resources)
@@ -413,7 +428,7 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 		}
 	}()
 
-	brokerList, err := helpers.InitializeKafkaConsumer()
+	brokerList, err := c.initializeKafkaConsumer()
 	if err != nil {
 		logrus.Errorf("Error fetching Kafka brokers: %v", err)
 		return err
@@ -421,7 +436,7 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 
 	// create topic and start consuming in go routine
 	go func() {
-		err := helpers.ConsumeKafkaMessages(brokerList, heimdallTopic)
+		err := c.consumeKafkaMessages(brokerList, heimdallTopic)
 		if err != nil {
 			logrus.Errorf("Error consuming Kafka messages: %v", err)
 			return
@@ -553,11 +568,145 @@ func (c *Controller) handleModifiedEvent(event watch.Event, item u.Unstructured,
 
 func (c *Controller) triggerResourceReconcile(item u.Unstructured, namespacedName string) {
 	logrus.Warnf("Triggering Reconcile for %s", namespacedName)
-	_, err := c.resourceReconcile(context.TODO(), &item)
+	_, err := c.ResourceReconcile(context.TODO(), &item)
 	if err != nil {
 		return
 	}
 
 	// Reconcile has completed so we can now delete the resource from the map indicating that it does not need a reconcile
 	helpers.DeleteResource(namespacedName, &resources)
+}
+
+func (c *Controller) initializeKafkaConsumer() ([]string, error) {
+	// Get Kafka broker list
+	brokerList, err := c.getBrokerList(namespace, kafkaClusterName)
+	if err != nil {
+		logrus.Errorf("failed to get broker list: %v", err)
+		return nil, err
+	}
+
+	return brokerList, nil
+}
+
+func (c *Controller) consumeKafkaMessages(brokerList []string, topic string) error {
+	config := kafka.NewConfig()
+	config.Consumer.Return.Errors = true
+	config.Consumer.Offsets.AutoCommit.Enable = true
+	config.Consumer.Offsets.AutoCommit.Interval = 8 * time.Second
+
+	consumer, err := kafka.NewConsumerGroup(brokerList, "kafka-consumer-group", config)
+	if err != nil {
+		return err
+	}
+	defer consumer.Close()
+
+	// Track processed messages
+	processedMessages := make(map[string]bool)
+
+	handler := ConsumerHandler{
+		processedMessages: processedMessages,
+	}
+
+	// Start consuming from Kafka topic
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	topics := []string{topic}
+
+	logrus.Infof("Starting Kafka consumer for topic %s", topic)
+	// loop indefinitely to keep consuming
+	for {
+		if err := consumer.Consume(ctx, topics, &handler); err != nil {
+			logrus.Errorf("Error from consumer: %v", err)
+			time.Sleep(5 * time.Second)
+		}
+	}
+}
+
+type ConsumerHandler struct {
+	processedMessages map[string]bool
+}
+
+func (h *ConsumerHandler) Setup(_ kafka.ConsumerGroupSession) error {
+	return nil
+}
+
+func (h *ConsumerHandler) Cleanup(_ kafka.ConsumerGroupSession) error {
+	return nil
+}
+
+func (h *ConsumerHandler) ConsumeClaim(sess kafka.ConsumerGroupSession, claim kafka.ConsumerGroupClaim) error {
+	for msg := range claim.Messages() {
+		resourceDetails, err := deconstructMessage(string(msg.Value))
+		if err != nil {
+			return err
+		}
+
+		// Check if message has already been processed
+		if h.processedMessages[resourceDetails.MessageID.String()] {
+			logrus.Infof("Skipping duplicate message: %v", resourceDetails)
+			continue
+		}
+
+		logrus.Infof("Received resource %s/%s from Kafka", resourceDetails.Namespace, resourceDetails.Name)
+
+		_ = schema.GroupVersionResource{
+			Group:    resourceDetails.Group,
+			Version:  resourceDetails.Version,
+			Resource: resourceDetails.Kind,
+		}
+
+		// Mark message as processed
+		h.processedMessages[resourceDetails.MessageID.String()] = true
+
+		// Mark message as consumed
+		sess.MarkMessage(msg, "")
+	}
+
+	return nil
+}
+
+func deconstructMessage(msg string) (*ResourceDetails, error) {
+	var resourceDetails ResourceDetails
+	err := json.Unmarshal([]byte(msg), &resourceDetails)
+	if err != nil {
+		return nil, err
+	}
+
+	return &resourceDetails, nil
+}
+
+func (c *Controller) getBrokerList(namespace string, kafkaClusterName string) ([]string, error) {
+	// Create Kubernetes clientset
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		logrus.Errorf("Failed to create in-cluster config: %v", err)
+		return nil, err
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		logrus.Errorf("Failed to create clientset: %v", err)
+		return nil, err
+	}
+
+	// Get list of Kafka broker services
+	svcList, err := clientset.CoreV1().Services(namespace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("strimzi.io/cluster=%s,strimzi.io/kind=Kafka", kafkaClusterName),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Create list of broker addresses in format "broker-address:broker-port"
+	brokerList := make([]string, len(svcList.Items))
+	for i, svc := range svcList.Items {
+		if svc.Spec.ClusterIP != "None" && strings.Contains(svc.Name, "bootstrap") {
+			brokerAddress := fmt.Sprintf("%s:%d", svc.Spec.ClusterIP, 9092)
+			brokerAddress = strings.Replace(brokerAddress, " ", "", -1)
+			brokerList[i] = brokerAddress
+		}
+	}
+
+	return brokerList, nil
 }
