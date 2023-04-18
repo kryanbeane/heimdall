@@ -19,7 +19,6 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"net"
-	"os/exec"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -46,9 +45,10 @@ const (
 	priorityLabel = "app.heimdall.io/priority"
 	ownerLabel    = "app.heimdall.io/owner"
 	secretName    = "heimdall-secret"
+	heimdallTopic = "heimdall-topic"
 )
 
-var configMap = v1.ConfigMap{
+var settingsMap = v1.ConfigMap{
 	ObjectMeta: metav1.ObjectMeta{
 		Name:      configMapName,
 		Namespace: namespace,
@@ -58,6 +58,14 @@ var configMap = v1.ConfigMap{
 		"low-priority-cadence":    "600s",
 		"medium-priority-cadence": "300s",
 		"high-priority-cadence":   "60s",
+		"fetch-cadence":           "10s",
+	},
+}
+
+var resourceMap = v1.ConfigMap{
+	ObjectMeta: metav1.ObjectMeta{
+		Name:      "heimdall-resource-map",
+		Namespace: namespace,
 	},
 }
 
@@ -79,7 +87,6 @@ var lastNotificationTimes = sync.Map{}
 
 // InitializeController Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel string) error {
-
 	ctr, err := controller.New("controller", mgr,
 		controller.Options{Reconciler: &Controller{
 			Client: mgr.GetClient(),
@@ -89,11 +96,10 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 		logrus.Errorf("failed to create controller: %v", err)
 		return err
 	}
-	logrus.Infof("Initialized Heimdall controller: %s", ctr)
+
+	logrus.Infof("Initialized Heimdall controller %s", ctr)
 
 	NewMetrics()
-
-	logrus.Infof("Prometheus Metrics registered")
 
 	// Create a Kubernetes client for low-level work
 	clientset, err = kubernetes.NewForConfig(mgr.GetConfig())
@@ -149,12 +155,21 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 	)
 	logrus.Infof("notification url: %s", url)
 
-	cm, err := c.ReconcileConfigMap(ctx)
+	settings, err := c.ReconcileSettingsConfigMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
-	if cm.Data == nil {
-		logrus.Warn("config map not configured, please configure Heimdall config map")
+	if settings.Data == nil {
+		logrus.Warn("settings config map not configured, please configure Heimdall config map")
+		return reconcile.Result{}, nil
+	}
+
+	_, err = c.ReconcileResourcesMap(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	if settings.Data == nil {
+		logrus.Warn("resource config map is empty")
 		return reconcile.Result{}, nil
 	}
 
@@ -167,7 +182,7 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 		return reconcile.Result{}, nil
 	}
 
-	err = c.ReconcileNotificationCadence(&res, url, priority, cm, secret)
+	err = c.ReconcileNotificationCadence(&res, url, priority, settings, secret)
 	if err != nil {
 		return ctrl.Result{}, nil
 	}
@@ -192,25 +207,6 @@ func sendSlackNotification(name string, resource *u.Unstructured, url string, pr
 		return err
 	}
 	lastNotificationTimes.Store(name, time.Now())
-	return nil
-}
-
-func installAdmissionController() error {
-	// use the install script to install the admission controller in the manifests directory
-	cmd := exec.Command("bash", "-c", "./install.sh")
-	cmd.Dir = "template/scripts"
-
-	// capture stdout and stderr output
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	// execute the command
-	if err := cmd.Run(); err != nil {
-		// include script output in error message
-		return fmt.Errorf("error installing admission controller: %v\n%s%s", err, stdout.String(), stderr.String())
-	}
-
 	return nil
 }
 
@@ -303,16 +299,16 @@ func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url 
 	return nil
 }
 
-func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, error) {
+func (c *Controller) ReconcileSettingsConfigMap(ctx context.Context) (v1.ConfigMap, error) {
 	var cm v1.ConfigMap
 
-	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&configMap), &cm); err != nil {
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&settingsMap), &cm); err != nil {
 		if errors.IsNotFound(err) {
-			if err := c.Client.Create(ctx, &configMap); err != nil {
+			if err := c.Client.Create(ctx, &settingsMap); err != nil {
 				return v1.ConfigMap{}, err
 			}
 			// Successful creation
-			return configMap, nil
+			return settingsMap, nil
 		}
 		return v1.ConfigMap{}, err
 	}
@@ -323,6 +319,24 @@ func (c *Controller) ReconcileConfigMap(ctx context.Context) (v1.ConfigMap, erro
 	}
 
 	// Successfully retrieved configmap
+	return cm, nil
+}
+
+func (c *Controller) ReconcileResourcesMap(ctx context.Context) (v1.ConfigMap, error) {
+	var cm v1.ConfigMap
+
+	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&resourceMap), &cm); err != nil {
+		if errors.IsNotFound(err) {
+			if err := c.Client.Create(ctx, &resourceMap); err != nil {
+				return v1.ConfigMap{}, err
+			}
+			// Successful creation
+			return resourceMap, nil
+		}
+		return v1.ConfigMap{}, err
+	}
+
+	// Successfully retrieved or created configmap
 	return cm, nil
 }
 
@@ -350,45 +364,64 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 }
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
+	logrus.Infof("Starting watch on resources!")
 	go func() {
-		ticker := time.NewTicker(time.Second * 15)
+		ticker := time.NewTicker(time.Second * 30)
 
 		for {
 			select {
 			case <-ticker.C:
-				c.discoverResourcesAndSetWatch(discoveryClient, dynamicClient, requiredLabel)
+
+				unstructuredItems, err := helpers.DiscoverClusterGRVsByLabel(discoveryClient, dynamicClient, requiredLabel)
+				if err != nil {
+					logrus.Errorf("error discovering cluster resources: %v", err)
+					return
+				}
+
+				ctx := context.TODO()
+				//Get config maps from cluster - they should exist due to install script but just in-case
+				_, err = c.ReconcileSettingsConfigMap(ctx)
+				if err != nil {
+					return
+				}
+
+				resourceMap, err = c.ReconcileResourcesMap(ctx)
+				if err != nil {
+					return
+				}
+
+				brokerList, err := helpers.InitializeKafkaConsumer()
+				if err != nil {
+					return
+				}
+
+				//create topic and start consuming in go routine so code can continue
+				go func() {
+					err := helpers.ConsumeKafkaMessages(brokerList, heimdallTopic)
+					if err != nil {
+						return
+					}
+				}()
+
+				// Allow configurable cadence for resource fetching
+				//fetchCadence := strings.Replace(settingsMap.Data["fetch-cadence"], "s", "", -1)
+				//cadenceTime, _ := strconv.Atoi(fetchCadence)
+
+				for _, item := range unstructuredItems {
+					c.updateMapAndWatchResource(dynamicClient, item)
+				}
 			}
 		}
 	}()
 	return nil
 }
 
-func (c *Controller) discoverResourcesAndSetWatch(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) {
-	unstructuredItems, err := helpers.DiscoverClusterGRVsByLabel(discoveryClient, dynamicClient, requiredLabel)
-	if err != nil {
-		logrus.Errorf("error discovering cluster resources: %v", err)
-		return
-	}
-	for _, item := range unstructuredItems {
-		c.updateMapAndWatchResource(dynamicClient, item)
-	}
-}
-
 func (c *Controller) updateMapAndWatchResource(dynamicClient dynamic.Interface, item u.Unstructured) {
-	// This function being triggered means resources with the label were found. This implies that the dev has
-	// added the label to a resource and so we can now create the admission webhook.
-
-	err := installAdmissionController()
-	if err != nil {
-		logrus.Errorf("error installing admission controller: %v", err)
-		return
-	}
-
-	logrus.Infof("installed admission controller")
 	// If not in the map; add it. if in the map; update it.
 	helpers.UpdateMapWithResource(item, namespacedName(&item), &resources)
 
 	namespacedName := namespacedName(&item)
+
 	go func() {
 		// Set up watch for the item
 		watcher, err := dynamicClient.Resource(helpers.GVRFromUnstructured(item)).Watch(context.TODO(), metav1.ListOptions{})
