@@ -65,6 +65,7 @@ func ConsumeKafkaMessages(brokerList []string, topic string) error {
 
 	topics := []string{topic}
 
+	logrus.Infof("Starting Kafka consumer for topic %s", topic)
 	// loop indefinitely to keep consuming
 	for {
 		if err := consumer.Consume(ctx, topics, &handler); err != nil {

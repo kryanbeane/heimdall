@@ -40,12 +40,13 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 }
 
 const (
-	configMapName = "heimdall-settings"
-	namespace     = "heimdall"
-	priorityLabel = "app.heimdall.io/priority"
-	ownerLabel    = "app.heimdall.io/owner"
-	secretName    = "heimdall-secret"
-	heimdallTopic = "heimdall-topic"
+	configMapName   = "heimdall-settings"
+	resourceMapName = "heimdall-resources"
+	namespace       = "heimdall"
+	priorityLabel   = "app.heimdall.io/priority"
+	ownerLabel      = "app.heimdall.io/owner"
+	secretName      = "heimdall-secret"
+	heimdallTopic   = "heimdall-topic"
 )
 
 var settingsMap = v1.ConfigMap{
@@ -64,7 +65,7 @@ var settingsMap = v1.ConfigMap{
 
 var resourceMap = v1.ConfigMap{
 	ObjectMeta: metav1.ObjectMeta{
-		Name:      "heimdall-resource-map",
+		Name:      resourceMapName,
 		Namespace: namespace,
 	},
 }
@@ -155,7 +156,7 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 	)
 	logrus.Infof("notification url: %s", url)
 
-	settings, err := c.ReconcileSettingsConfigMap(ctx)
+	settings, err := c.reconcileSettingsConfigMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -164,7 +165,7 @@ func (c *Controller) resourceReconcile(ctx context.Context, resource *u.Unstruct
 		return reconcile.Result{}, nil
 	}
 
-	_, err = c.ReconcileResourcesMap(ctx)
+	_, err = c.reconcileResourcesMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -194,6 +195,9 @@ func namespacedName(resource *u.Unstructured) string {
 	return resource.GetNamespace() + "/" + resource.GetName()
 }
 
+func configMapSafeNamespacedName(resource *u.Unstructured) string {
+	return resource.GetNamespace() + "." + resource.GetName()
+}
 func parseNamespacedName(namespacedName string) (string, string, error) {
 	parts := strings.Split(namespacedName, ".")
 	if len(parts) != 2 {
@@ -299,7 +303,7 @@ func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url 
 	return nil
 }
 
-func (c *Controller) ReconcileSettingsConfigMap(ctx context.Context) (v1.ConfigMap, error) {
+func (c *Controller) reconcileSettingsConfigMap(ctx context.Context) (v1.ConfigMap, error) {
 	var cm v1.ConfigMap
 
 	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&settingsMap), &cm); err != nil {
@@ -322,7 +326,7 @@ func (c *Controller) ReconcileSettingsConfigMap(ctx context.Context) (v1.ConfigM
 	return cm, nil
 }
 
-func (c *Controller) ReconcileResourcesMap(ctx context.Context) (v1.ConfigMap, error) {
+func (c *Controller) reconcileResourcesMap(ctx context.Context) (v1.ConfigMap, error) {
 	var cm v1.ConfigMap
 
 	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&resourceMap), &cm); err != nil {
@@ -364,55 +368,142 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 }
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
-	logrus.Infof("Starting watch on resources!")
 	go func() {
 		ticker := time.NewTicker(time.Second * 30)
 
 		for {
 			select {
 			case <-ticker.C:
-
 				unstructuredItems, err := helpers.DiscoverClusterGRVsByLabel(discoveryClient, dynamicClient, requiredLabel)
 				if err != nil {
-					logrus.Errorf("error discovering cluster resources: %v", err)
-					return
+					logrus.Errorf("Error discovering cluster Resources: %v, will try again", err)
+					continue
 				}
 
 				ctx := context.TODO()
 				//Get config maps from cluster - they should exist due to install script but just in-case
-				_, err = c.ReconcileSettingsConfigMap(ctx)
+				settingsMap, err = c.reconcileSettingsConfigMap(ctx)
 				if err != nil {
-					return
+					logrus.Errorf("Error reconciling settings Config Map: %v", err)
+					continue
+				}
+				if settingsMap.Data == nil {
+					logrus.Warnf("Settings config map not configured, re-run install script to configure Slack")
 				}
 
-				resourceMap, err = c.ReconcileResourcesMap(ctx)
+				resourceMap, err = c.reconcileResourcesMap(ctx)
 				if err != nil {
-					return
+					logrus.Errorf("Error reconciling resource Config Map: %v", err)
+					continue
 				}
 
-				brokerList, err := helpers.InitializeKafkaConsumer()
-				if err != nil {
-					return
+				if err = c.reconcileResourceStatus(unstructuredItems); err != nil {
+					logrus.Errorf("Error reconciling resource status: %v", err)
+					continue
 				}
-
-				//create topic and start consuming in go routine so code can continue
-				go func() {
-					err := helpers.ConsumeKafkaMessages(brokerList, heimdallTopic)
-					if err != nil {
-						return
-					}
-				}()
 
 				// Allow configurable cadence for resource fetching
 				//fetchCadence := strings.Replace(settingsMap.Data["fetch-cadence"], "s", "", -1)
 				//cadenceTime, _ := strconv.Atoi(fetchCadence)
 
-				for _, item := range unstructuredItems {
-					c.updateMapAndWatchResource(dynamicClient, item)
-				}
+				//for _, item := range unstructuredItems {
+				//	c.updateMapAndWatchResource(dynamicClient, item)
+				//}
 			}
 		}
 	}()
+
+	brokerList, err := helpers.InitializeKafkaConsumer()
+	if err != nil {
+		logrus.Errorf("Error fetching Kafka brokers: %v", err)
+		return err
+	}
+
+	// create topic and start consuming in go routine
+	go func() {
+		err := helpers.ConsumeKafkaMessages(brokerList, heimdallTopic)
+		if err != nil {
+			logrus.Errorf("Error consuming Kafka messages: %v", err)
+			return
+		}
+	}()
+
+	return nil
+}
+
+func (c *Controller) reconcileResourceStatus(items []u.Unstructured) error {
+	// Get the latest version of the ConfigMap
+	if err := c.Client.Get(context.TODO(), client.ObjectKeyFromObject(&resourceMap), &resourceMap); err != nil {
+		return err
+	}
+
+	if resourceMap.Data == nil {
+		resourceMap.Data = make(map[string]string)
+	}
+
+	logrus.Infof("Reconciling resources map and adding new resources: %v", resourceMap.Data)
+	// Check and add new resources to the config map
+	for _, item := range items {
+		itemName := configMapSafeNamespacedName(&item)
+
+		if _, ok := resourceMap.Data[itemName]; !ok {
+			logrus.Infof("Resource not found in map: %s adding it", itemName)
+			if err := c.addNewResourceToMap(item, resourceMap); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Check and remove outdated resources from the config map
+	for key := range resourceMap.Data {
+		var found bool
+		for _, item := range items {
+			if configMapSafeNamespacedName(&item) == key {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			err := c.removeOldResourceFromMap(key, resourceMap)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// update reference to the config map with newest version
+	if err := c.Client.Get(context.TODO(), client.ObjectKeyFromObject(&resourceMap), &resourceMap); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Controller) removeOldResourceFromMap(key string, cm v1.ConfigMap) error {
+	delete(cm.Data, key)
+	logrus.Infof("Removing old resource from map: %s", key)
+	if err := c.Client.Update(context.TODO(), &cm); err != nil {
+		logrus.Infof("Error updating configmap: %v", err)
+		return err
+	}
+	resourceMap = cm
+	return nil
+}
+
+func (c *Controller) addNewResourceToMap(item u.Unstructured, cm v1.ConfigMap) error {
+	if cm.Data == nil {
+		logrus.Infof("ConfigMap Data is nil. Initializing map")
+		cm.Data = make(map[string]string)
+	}
+
+	cm.Data[configMapSafeNamespacedName(&item)] = time.Now().String()
+	logrus.Infof("Adding new resource to map: %s with time of %s", configMapSafeNamespacedName(&item), time.Now().String())
+	if err := c.Client.Update(context.TODO(), &cm); err != nil {
+		logrus.Infof("Error updating configmap: %v", err)
+		return err
+	}
+	resourceMap = cm
 	return nil
 }
 
