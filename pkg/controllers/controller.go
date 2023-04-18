@@ -319,7 +319,8 @@ func (c *Controller) reconcileSettingsConfigMap(ctx context.Context) (v1.ConfigM
 
 	channelValue := cm.Data["slack-channel"]
 	if channelValue == "default-heimdall-channel" || channelValue == "" {
-		return v1.ConfigMap{Data: nil}, nil
+		settingsMap.Data = nil
+		return settingsMap, nil
 	}
 
 	// Successfully retrieved configmap
@@ -337,7 +338,6 @@ func (c *Controller) reconcileResourcesMap(ctx context.Context) (v1.ConfigMap, e
 			// Successful creation
 			return resourceMap, nil
 		}
-		return v1.ConfigMap{}, err
 	}
 
 	// Successfully retrieved or created configmap
@@ -436,18 +436,16 @@ func (c *Controller) reconcileResourceStatus(items []u.Unstructured) error {
 	if err := c.Client.Get(context.TODO(), client.ObjectKeyFromObject(&resourceMap), &resourceMap); err != nil {
 		return err
 	}
-
 	if resourceMap.Data == nil {
 		resourceMap.Data = make(map[string]string)
 	}
 
-	logrus.Infof("Reconciling resources map and adding new resources: %v", resourceMap.Data)
 	// Check and add new resources to the config map
 	for _, item := range items {
 		itemName := configMapSafeNamespacedName(&item)
 
 		if _, ok := resourceMap.Data[itemName]; !ok {
-			logrus.Infof("Resource not found in map: %s adding it", itemName)
+			logrus.Infof("Resource %s not found in map, adding it", itemName)
 			if err := c.addNewResourceToMap(item, resourceMap); err != nil {
 				return err
 			}
@@ -465,6 +463,7 @@ func (c *Controller) reconcileResourceStatus(items []u.Unstructured) error {
 		}
 
 		if !found {
+
 			err := c.removeOldResourceFromMap(key, resourceMap)
 			if err != nil {
 				return err
