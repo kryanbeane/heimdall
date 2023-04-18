@@ -4,7 +4,6 @@ go 1.19
 
 require (
 	github.com/Shopify/sarama v1.38.1
-	github.com/bsm/sarama-cluster v2.1.15+incompatible
 	github.com/gertd/go-pluralize v0.2.1
 	github.com/google/uuid v1.3.0
 	github.com/itchyny/gojq v0.12.12
@@ -14,7 +13,7 @@ require (
 	github.com/sirupsen/logrus v1.9.0
 	github.com/slack-go/slack v0.12.1
 	k8s.io/api v0.26.3
-	k8s.io/apimachinery v0.27.0
+	k8s.io/apimachinery v0.27.1
 	k8s.io/client-go v0.26.3
 	sigs.k8s.io/controller-runtime v0.14.6
 )
@@ -66,7 +65,6 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/onsi/ginkgo v1.16.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.17 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_model v0.3.0 // indirect
