@@ -5,20 +5,23 @@ import (
 	"encoding/json"
 	"fmt"
 	kafka "github.com/Shopify/sarama"
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"strings"
+	"time"
 )
 
 var (
-	heimdallTopic    = "heimdall-topic"
 	kafkaClusterName = "heimdall-kafka-cluster"
 	namespace        = "heimdall"
+	heimdallTopic    = "heimdall-topic"
 )
 
 type ResourceDetails struct {
+	MessageID uuid.UUID
 	Name      string
 	Namespace string
 	Kind      string
@@ -26,62 +29,86 @@ type ResourceDetails struct {
 	Version   string
 }
 
-func InitializeKafkaConsumption() error {
+func InitializeKafkaConsumer() ([]string, error) {
 	// Get Kafka broker list
 	brokerList, err := getBrokerList(namespace, kafkaClusterName)
 	if err != nil {
 		logrus.Errorf("failed to get broker list: %v", err)
-		return err
+		return nil, err
 	}
 
-	logrus.Infof("retrieved Kafka broker address %s", brokerList)
-	err = consumeKafkaMessages(brokerList, heimdallTopic)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return brokerList, nil
 }
 
-func consumeKafkaMessages(brokerList []string, topic string) error {
-	consumerConfig := kafka.NewConfig()
-	consumerConfig.Consumer.Return.Errors = true
+func ConsumeKafkaMessages(brokerList []string, topic string) error {
+	config := kafka.NewConfig()
+	config.Consumer.Return.Errors = true
+	config.Consumer.Offsets.AutoCommit.Enable = true
+	config.Consumer.Offsets.AutoCommit.Interval = 8 * time.Second
 
-	// Connect to Kafka broker with new consumer
-	consumer, err := kafka.NewConsumer(brokerList, consumerConfig)
+	consumer, err := kafka.NewConsumerGroup(brokerList, "kafka-consumer-group", config)
 	if err != nil {
 		return err
 	}
 	defer consumer.Close()
 
-	err = createKafkaTopic(*consumerConfig, brokerList)
-	if err != nil {
-		return err
+	// Track processed messages
+	processedMessages := make(map[string]bool)
+
+	handler := ConsumerHandler{
+		processedMessages: processedMessages,
 	}
 
-	// Subscribe to Kafka topic
-	partition, err := consumer.ConsumePartition(topic, 0, kafka.OffsetOldest)
-	if err != nil {
-		return err
-	}
+	// Start consuming from Kafka topic
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Consume Kafka messages
+	topics := []string{topic}
+
+	// loop indefinitely to keep consuming
 	for {
-		select {
-		case msg := <-partition.Messages():
-			resourceDetails, err := deconstructMessage(string(msg.Value))
-			if err != nil {
-				return err
-			}
-
-			//TODO Deal with new resource details - queue it for reconcile
-			logrus.Infof("Received message: %v", resourceDetails)
-
-			fmt.Printf("Received message: %v\n", string(msg.Value))
-		case err := <-partition.Errors():
-			fmt.Printf("Error while consuming message: %v\n", err)
+		if err := consumer.Consume(ctx, topics, &handler); err != nil {
+			logrus.Errorf("Error from consumer: %v", err)
+			time.Sleep(5 * time.Second)
 		}
 	}
+}
+
+type ConsumerHandler struct {
+	processedMessages map[string]bool
+}
+
+func (h *ConsumerHandler) Setup(_ kafka.ConsumerGroupSession) error {
+	return nil
+}
+
+func (h *ConsumerHandler) Cleanup(_ kafka.ConsumerGroupSession) error {
+	return nil
+}
+
+func (h *ConsumerHandler) ConsumeClaim(sess kafka.ConsumerGroupSession, claim kafka.ConsumerGroupClaim) error {
+	for msg := range claim.Messages() {
+		resourceDetails, err := deconstructMessage(string(msg.Value))
+		if err != nil {
+			return err
+		}
+
+		// Check if message has already been processed
+		if h.processedMessages[resourceDetails.MessageID.String()] {
+			logrus.Infof("Skipping duplicate message: %v", resourceDetails)
+			continue
+		}
+
+		logrus.Infof("Received resource %s/%s from Kafka", resourceDetails.Namespace, resourceDetails.Name)
+
+		// Mark message as processed
+		h.processedMessages[resourceDetails.MessageID.String()] = true
+
+		// Mark message as consumed
+		sess.MarkMessage(msg, "")
+	}
+
+	return nil
 }
 
 func deconstructMessage(msg string) (*ResourceDetails, error) {

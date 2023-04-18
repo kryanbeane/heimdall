@@ -364,9 +364,9 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 }
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
-
+	logrus.Infof("Starting watch on resources!")
 	go func() {
-		ticker := time.NewTicker(time.Second * 5)
+		ticker := time.NewTicker(time.Second * 30)
 
 		for {
 			select {
@@ -380,23 +380,24 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 
 				ctx := context.TODO()
 				//Get config maps from cluster - they should exist due to install script but just in-case
-				settingsMap, err := c.ReconcileSettingsConfigMap(ctx)
+				_, err = c.ReconcileSettingsConfigMap(ctx)
 				if err != nil {
-					logrus.Errorf("I am failing %s", err)
 					return
 				}
-				logrus.Infof("settings map: %v", settingsMap)
 
 				resourceMap, err = c.ReconcileResourcesMap(ctx)
 				if err != nil {
-					logrus.Errorf("I am failing %s", err)
 					return
 				}
-				logrus.Infof("resource map: %v", resourceMap)
+
+				brokerList, err := helpers.InitializeKafkaConsumer()
+				if err != nil {
+					return
+				}
 
 				//create topic and start consuming in go routine so code can continue
 				go func() {
-					err := helpers.InitializeKafkaConsumption()
+					err := helpers.ConsumeKafkaMessages(brokerList, heimdallTopic)
 					if err != nil {
 						return
 					}
@@ -407,16 +408,6 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 				//cadenceTime, _ := strconv.Atoi(fetchCadence)
 
 				for _, item := range unstructuredItems {
-					//TODO we no lnger need to watch resources since changes are being blocked
-					// instead, we want to have a config map containing all of the resources being monitored
-
-					//TODO If the resource doesn't already exist in the config map then add it and trigger a reconcile
-					// this is because we want to trigger the controller's functionality to reconcile stuff
-					// we can ensure no message is sent here by setting the last notification time to now
-					// this initializes a new resource in the maps
-
-					//TODO if it already exists, no need to trigger reconcile just keep polling for changes in kafka
-
 					c.updateMapAndWatchResource(dynamicClient, item)
 				}
 			}

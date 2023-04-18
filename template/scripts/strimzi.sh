@@ -25,10 +25,7 @@ else
     fi
 
     echo "Waiting for Kafka Cluster to be ready..."
-    if ! kubectl wait kafka/heimdall-kafka-cluster --for=condition=Ready --timeout=300s -n "$NAMESPACE"; then
-        echo "Error waiting for Kafka Cluster to be ready" >&2
-        exit 1
-    fi
+    kubectl wait kafka/heimdall-kafka-cluster --for=condition=Ready --timeout=300s -n "$NAMESPACE"
 fi
 
 echo "Strimzi Operator and Kafka Cluster initialized in namespace $NAMESPACE"
