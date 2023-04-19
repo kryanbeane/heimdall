@@ -5,7 +5,7 @@ read -p "Enter the Slack token: " input_string
 
 # Trim the input string and base64-encode it
 trimmed_string=$(echo -n "$input_string" | tr -d '[:space:]')
-encoded_string=$(echo -n $trimmed_string | base64 -w 0)
+export encoded_string=$(echo -n $trimmed_string | base64 -w 0)
 
 # Create the YAML file with the encoded string
 cat <<EOF > ../secret.yaml
@@ -19,6 +19,6 @@ data:
 type: Opaque
 EOF
 
-kubectl apply -f ./template/secret.yaml
+kubectl apply -f ../secret.yaml
 
 kubectl apply -f ./template/config-maps.yaml

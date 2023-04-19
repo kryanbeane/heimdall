@@ -30,7 +30,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -39,6 +38,8 @@ type Controller struct {
 	Scheme *runtime.Scheme
 }
 
+var ctr *Controller
+
 type ResourceDetails struct {
 	MessageID uuid.UUID
 	Name      string
@@ -46,10 +47,11 @@ type ResourceDetails struct {
 	Kind      string
 	Group     string
 	Version   string
+	Resource  string
 }
 
 // Reconcile Placeholder for now as we don't need a traditional reconcile loop
-func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+func (c *Controller) Reconcile(_ context.Context, _ reconcile.Request) (reconcile.Result, error) {
 	return reconcile.Result{}, nil
 }
 
@@ -98,8 +100,6 @@ var secret = v1.Secret{
 var clientset *kubernetes.Clientset
 var dc *discovery.DiscoveryClient
 var dynamicClient dynamic.Interface
-var resources = sync.Map{}
-var lastNotificationTimes = sync.Map{}
 
 // InitializeController Add +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel string) error {
@@ -141,36 +141,27 @@ func (c *Controller) InitializeController(mgr manager.Manager, requiredLabel str
 }
 
 func (c *Controller) ResourceReconcile(ctx context.Context, resource *u.Unstructured) (reconcile.Result, error) {
-	WatchingResourcesCount.Set(float64(helpers.GetMapLength(&resources)))
-
-	res, found := helpers.RetrieveResource(namespacedName(resource), &resources)
-	if !found {
-		logrus.Errorf("failed to retrieve resource from map: %v", namespacedName(resource))
-		return reconcile.Result{}, nil
-	}
+	//WatchingResourcesCount.Set(float64(helpers.GetMapLength(&resources)))
+	// We know priority label is configured so we can log that reconcile is occurring
+	logrus.Infof("Reconciling %s with importance of %s", namespacedName(resource), resource.GetLabels()[priorityLabel])
 
 	logrus.Infof("Reconciling labels for %s", namespacedName(resource))
-	priority, err := c.ReconcileLabels(ctx, res)
+	priority, err := ctr.ReconcileLabels(ctx, *resource)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
 
-	// We know priority label is configured so we can log that reconcile is occurring
-	logrus.Infof("reconciling %s with importance of %s", namespacedName(&res), res.GetLabels()[priorityLabel])
-
-	// Update the map with the latest resource version
-	helpers.UpdateMapWithResource(res, namespacedName(&res), &resources)
-
 	// Get notification URL
 	url := provider.BuildNotificationURL(*clientset,
 		gcp2.ResourceInformation{
-			Name:      res.GetName(),
-			Namespace: res.GetNamespace(),
+			Name:      resource.GetName(),
+			Namespace: resource.GetNamespace(),
 			NodeName:  "",
 		},
 	)
-	logrus.Infof("notification url: %s", url)
+	logrus.Infof("Notification URL created: %s", url)
 
+	logrus.Infof("Reconciling Settings Config Map: %s", configMapName)
 	settings, err := c.reconcileSettingsConfigMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -180,7 +171,8 @@ func (c *Controller) ResourceReconcile(ctx context.Context, resource *u.Unstruct
 		return reconcile.Result{}, nil
 	}
 
-	_, err = c.reconcileResourcesMap(ctx)
+	logrus.Infof("Reconciling Resources Config Map: %s", resourceMapName)
+	resourceMap, err = c.reconcileResourcesMap(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -189,7 +181,8 @@ func (c *Controller) ResourceReconcile(ctx context.Context, resource *u.Unstruct
 		return reconcile.Result{}, nil
 	}
 
-	secret, err = c.ReconcileSecret(ctx)
+	logrus.Infof("Reconciling Secret: %s", secretName)
+	secret, err = c.reconcileSecret(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -198,7 +191,8 @@ func (c *Controller) ResourceReconcile(ctx context.Context, resource *u.Unstruct
 		return reconcile.Result{}, nil
 	}
 
-	err = c.ReconcileNotificationCadence(&res, url, priority, settings, secret)
+	logrus.Infof("Reconciling Notification Cadence for %s", namespacedName(resource))
+	err = c.ReconcileNotificationCadence(resource, url, priority, settings, resourceMap, secret)
 	if err != nil {
 		return ctrl.Result{}, nil
 	}
@@ -221,11 +215,11 @@ func parseNamespacedName(namespacedName string) (string, string, error) {
 	return parts[0], parts[1], nil
 }
 
-func sendSlackNotification(name string, resource *u.Unstructured, url string, priority string, secret v1.Secret, configMap v1.ConfigMap) error {
+func sendSlackNotification(resource *u.Unstructured, url string, priority string, secret v1.Secret, configMap v1.ConfigMap) error {
 	if err := slack.SendEvent(*resource, url, priority, secret, configMap); err != nil {
+		logrus.Errorf("failed to send slack notification: %v", err)
 		return err
 	}
-	lastNotificationTimes.Store(name, time.Now())
 	return nil
 }
 
@@ -234,7 +228,10 @@ func (c *Controller) ReconcileLabels(ctx context.Context, resource u.Unstructure
 
 	// If resource no longer has the label or if label is empty (no priority set) then delete it from the map
 	if value, labelExists := resource.GetLabels()[priorityLabel]; !labelExists || value == "" {
-		resources.Delete(namespacedName(&resource))
+		err := ctr.removeOldResourceFromMap(configMapSafeNamespacedName(&resource), resourceMap)
+		if err != nil {
+			return "", err
+		}
 		return "", nil
 	}
 
@@ -298,32 +295,38 @@ func (c *Controller) ReconcileLabels(ctx context.Context, resource u.Unstructure
 	return priority, nil
 }
 
-func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url string, priority string, configMap v1.ConfigMap, secret v1.Secret) error {
-	cadence, err := time.ParseDuration(configMap.Data[priority+"-priority-cadence"])
+func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url string, priority string, settings v1.ConfigMap, resources v1.ConfigMap, secret v1.Secret) error {
+	cadence, err := time.ParseDuration(settings.Data[priority+"-priority-cadence"])
 	if err != nil {
 		return err
 	}
 
-	lastNotificationTime, loaded := lastNotificationTimes.LoadOrStore(namespacedName(resource), time.Now())
-	if loaded {
-		if !lastNotificationTime.(time.Time).Add(cadence).Before(time.Now()) {
-			logrus.Warnf("skipping notification for %s because the last message was sent less than %s ago", namespacedName(resource), cadence.String())
-			return nil
-		}
+	lastNotificationTimeString := resourceMap.Data[configMapSafeNamespacedName(resource)]
+
+	lastNotificationTime, err := time.Parse(time.RFC3339, lastNotificationTimeString)
+	if err != nil {
+		logrus.Errorf("failed to parse last notification time: %v", err)
+		return err
 	}
 
-	if err = sendSlackNotification(namespacedName(resource), resource, url, priority, secret, configMap); err != nil {
+	if !lastNotificationTime.Add(cadence).Before(time.Now()) {
+		logrus.Warnf("skipping notification for %s because the last message was sent less than %s ago", namespacedName(resource), cadence.String())
+		return nil
+	}
+
+	logrus.Infof("New Notification permitted, sending Slack message to Channel %s", settings.Data["slack-channel"])
+
+	if err = sendSlackNotification(resource, url, priority, secret, settings); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (c *Controller) reconcileSettingsConfigMap(ctx context.Context) (v1.ConfigMap, error) {
-	var cm v1.ConfigMap
-
-	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&settingsMap), &cm); err != nil {
+	if err := ctr.Client.Get(ctx, client.ObjectKeyFromObject(&settingsMap), &settingsMap); err != nil {
 		if errors.IsNotFound(err) {
-			if err := c.Client.Create(ctx, &settingsMap); err != nil {
+			if err := ctr.Client.Create(ctx, &settingsMap); err != nil {
+
 				return v1.ConfigMap{}, err
 			}
 			// Successful creation
@@ -332,14 +335,14 @@ func (c *Controller) reconcileSettingsConfigMap(ctx context.Context) (v1.ConfigM
 		return v1.ConfigMap{}, err
 	}
 
-	channelValue := cm.Data["slack-channel"]
+	channelValue := settingsMap.Data["slack-channel"]
 	if channelValue == "default-heimdall-channel" || channelValue == "" {
 		settingsMap.Data = nil
 		return settingsMap, nil
 	}
 
 	// Successfully retrieved configmap
-	return cm, nil
+	return settingsMap, nil
 }
 
 func (c *Controller) reconcileResourcesMap(ctx context.Context) (v1.ConfigMap, error) {
@@ -359,7 +362,7 @@ func (c *Controller) reconcileResourcesMap(ctx context.Context) (v1.ConfigMap, e
 	return cm, nil
 }
 
-func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
+func (c *Controller) reconcileSecret(ctx context.Context) (v1.Secret, error) {
 	var s v1.Secret
 
 	if err := c.Client.Get(ctx, client.ObjectKeyFromObject(&secret), &s); err != nil {
@@ -382,9 +385,15 @@ func (c *Controller) ReconcileSecret(ctx context.Context) (v1.Secret, error) {
 	return s, nil
 }
 
+var discClient *discovery.DiscoveryClient
+var dynInterface dynamic.Interface
+
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
+	discClient = discoveryClient
+	dynInterface = dynamicClient
+
 	go func() {
-		ticker := time.NewTicker(time.Second * 30)
+		ticker := time.NewTicker(time.Second * 10)
 
 		for {
 			select {
@@ -416,14 +425,6 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 					logrus.Errorf("Error reconciling resource status: %v", err)
 					continue
 				}
-
-				// Allow configurable cadence for resource fetching
-				//fetchCadence := strings.Replace(settingsMap.Data["fetch-cadence"], "s", "", -1)
-				//cadenceTime, _ := strconv.Atoi(fetchCadence)
-
-				//for _, item := range unstructuredItems {
-				//	c.updateMapAndWatchResource(dynamicClient, item)
-				//}
 			}
 		}
 	}()
@@ -433,6 +434,9 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 		logrus.Errorf("Error fetching Kafka brokers: %v", err)
 		return err
 	}
+
+	// Set ctr reference so that we don't have a nil controller value during reconcile
+	ctr = c
 
 	// create topic and start consuming in go routine
 	go func() {
@@ -461,6 +465,14 @@ func (c *Controller) reconcileResourceStatus(items []u.Unstructured) error {
 
 		if _, ok := resourceMap.Data[itemName]; !ok {
 			logrus.Infof("Resource %s not found in map, adding it", itemName)
+
+			// First change the label to be the ip address
+			_, err := c.ReconcileLabels(context.TODO(), item)
+			if err != nil {
+				return err
+			}
+
+			// them add it to the map
 			if err := c.addNewResourceToMap(item, resourceMap); err != nil {
 				return err
 			}
@@ -511,8 +523,8 @@ func (c *Controller) addNewResourceToMap(item u.Unstructured, cm v1.ConfigMap) e
 		cm.Data = make(map[string]string)
 	}
 
-	cm.Data[configMapSafeNamespacedName(&item)] = time.Now().String()
-	logrus.Infof("Adding new resource to map: %s with time of %s", configMapSafeNamespacedName(&item), time.Now().String())
+	cm.Data[configMapSafeNamespacedName(&item)] = time.Now().Format(time.RFC3339)
+	logrus.Infof("Adding new resource to map: %s with time of %s", configMapSafeNamespacedName(&item), time.Now().Format(time.RFC3339))
 	if err := c.Client.Update(context.TODO(), &cm); err != nil {
 		logrus.Infof("Error updating configmap: %v", err)
 		return err
@@ -523,7 +535,7 @@ func (c *Controller) addNewResourceToMap(item u.Unstructured, cm v1.ConfigMap) e
 
 func (c *Controller) updateMapAndWatchResource(dynamicClient dynamic.Interface, item u.Unstructured) {
 	// If not in the map; add it. if in the map; update it.
-	helpers.UpdateMapWithResource(item, namespacedName(&item), &resources)
+	//helpers.UpdateMapWithResource(item, namespacedName(&item), &resources)
 
 	namespacedName := namespacedName(&item)
 
@@ -551,13 +563,13 @@ func (c *Controller) updateMapAndWatchResource(dynamicClient dynamic.Interface, 
 }
 
 func (c *Controller) handleModifiedEvent(event watch.Event, item u.Unstructured, namespacedName string) {
-	unstructuredObj, ok := event.Object.(*u.Unstructured)
+	_, ok := event.Object.(*u.Unstructured)
 	if !ok {
 		logrus.Error("error converting object to *unstructured.Unstructured")
 		return
 	}
 	// Update the resource in the map
-	helpers.UpdateMapWithResource(*unstructuredObj, namespacedName, &resources)
+	//helpers.UpdateMapWithResource(*unstructuredObj, namespacedName, &resources)
 
 	logrus.Infof("Object %s has been modified", namespacedName)
 
@@ -567,14 +579,13 @@ func (c *Controller) handleModifiedEvent(event watch.Event, item u.Unstructured,
 }
 
 func (c *Controller) triggerResourceReconcile(item u.Unstructured, namespacedName string) {
-	logrus.Warnf("Triggering Reconcile for %s", namespacedName)
 	_, err := c.ResourceReconcile(context.TODO(), &item)
 	if err != nil {
 		return
 	}
 
 	// Reconcile has completed so we can now delete the resource from the map indicating that it does not need a reconcile
-	helpers.DeleteResource(namespacedName, &resources)
+	//helpers.DeleteResource(namespacedName, &resources)
 }
 
 func (c *Controller) initializeKafkaConsumer() ([]string, error) {
@@ -617,22 +628,35 @@ func (c *Controller) consumeKafkaMessages(brokerList []string, topic string) err
 	// loop indefinitely to keep consuming
 	for {
 		if err := consumer.Consume(ctx, topics, &handler); err != nil {
-			logrus.Errorf("Error from consumer: %v", err)
+			logrus.Errorf("Error from consumer: %v, retrying", err)
 			time.Sleep(5 * time.Second)
 		}
 	}
 }
+func (c *Controller) triggerReconcile(resourceDetails ResourceDetails) error {
+
+	gvr := schema.GroupVersionResource{
+		Group:    resourceDetails.Group,
+		Version:  resourceDetails.Version,
+		Resource: resourceDetails.Resource,
+	}
+
+	resource, err := dynamicClient.Resource(gvr).Namespace(resourceDetails.Namespace).Get(context.TODO(), resourceDetails.Name, metav1.GetOptions{})
+	if err != nil {
+		logrus.Errorf("Error getting Resource: %s", err)
+		return err
+	}
+
+	_, err = c.ResourceReconcile(context.TODO(), resource)
+	if err != nil {
+		logrus.Errorf("Error reconciling Resource: %s", err)
+		return err
+	}
+	return nil
+}
 
 type ConsumerHandler struct {
 	processedMessages map[string]bool
-}
-
-func (h *ConsumerHandler) Setup(_ kafka.ConsumerGroupSession) error {
-	return nil
-}
-
-func (h *ConsumerHandler) Cleanup(_ kafka.ConsumerGroupSession) error {
-	return nil
 }
 
 func (h *ConsumerHandler) ConsumeClaim(sess kafka.ConsumerGroupSession, claim kafka.ConsumerGroupClaim) error {
@@ -647,14 +671,10 @@ func (h *ConsumerHandler) ConsumeClaim(sess kafka.ConsumerGroupSession, claim ka
 			logrus.Infof("Skipping duplicate message: %v", resourceDetails)
 			continue
 		}
+		logrus.Infof("—————————————————————————————————————————————————————————————————————————————")
+		logrus.Infof("Received resource %s/%s from Kafka, queueing it for Reconcile", resourceDetails.Namespace, resourceDetails.Name)
 
-		logrus.Infof("Received resource %s/%s from Kafka", resourceDetails.Namespace, resourceDetails.Name)
-
-		_ = schema.GroupVersionResource{
-			Group:    resourceDetails.Group,
-			Version:  resourceDetails.Version,
-			Resource: resourceDetails.Kind,
-		}
+		ctr.triggerReconcile(*resourceDetails)
 
 		// Mark message as processed
 		h.processedMessages[resourceDetails.MessageID.String()] = true
@@ -709,4 +729,14 @@ func (c *Controller) getBrokerList(namespace string, kafkaClusterName string) ([
 	}
 
 	return brokerList, nil
+}
+
+// Setup Necessary for Consumer Groups
+func (h *ConsumerHandler) Setup(_ kafka.ConsumerGroupSession) error {
+	return nil
+}
+
+// Cleanup Necessary for Consumer Groups
+func (h *ConsumerHandler) Cleanup(_ kafka.ConsumerGroupSession) error {
+	return nil
 }
