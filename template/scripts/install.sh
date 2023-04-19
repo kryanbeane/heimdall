@@ -13,7 +13,8 @@ rm -rf heimdall-admission
 
 echo "Installing Heimdall"
 
+./template/scripts/gen-configs.sh
+
 docker pull kryanbeane/heimdall:dev
 make deploy IMG=kryanbeane/heimdall:dev
 
-./template/scripts/gen-configs.sh

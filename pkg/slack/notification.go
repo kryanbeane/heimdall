@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"github.com/sirupsen/logrus"
 	"github.com/slack-go/slack"
 	slackclient "github.com/slack-go/slack"
 	corev1 "k8s.io/api/core/v1"
@@ -61,6 +62,12 @@ func SendEvent(u u.Unstructured, url string, priority string, secret corev1.Secr
 			},
 		},
 		Footer: "Notifications provided by Heimdall",
+	}
+
+	// test slack auth
+	if _, err := api.AuthTest(); err != nil {
+		logrus.Errorf("Slack auth test failed: %v", err)
+		return err
 	}
 
 	// Send message to Slack

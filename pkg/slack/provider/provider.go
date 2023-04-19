@@ -46,7 +46,7 @@ func BuildNotificationURL(client kubernetes.Clientset, resourceInformation gcp2.
 	case provider == openshift:
 		openshift2.BuildOpenshiftLink(provider, resourceInfo)
 	default:
-		link = "http://127.0.0.1:40307/api/v1/namespaces/" + resourceInfo.Namespace + "/services/http:kubernetes-dashboard:/proxy/#/deployment/" + resourceInfo.Namespace + "/" + resourceInfo.Name + "?namespace=" + resourceInfo.Namespace
+		link = "http://127.0.0.1:40307/api/v1/namespaces/" + resourceInfo.Namespace + "/services/http:kubernetes-dashboard:/proxy/#/pod/" + resourceInfo.Namespace + "/" + resourceInfo.Name + "?namespace=" + resourceInfo.Namespace
 	}
 
 	return link
