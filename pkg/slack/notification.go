@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"fmt"
 	"github.com/sirupsen/logrus"
 	"github.com/slack-go/slack"
 	slackclient "github.com/slack-go/slack"
@@ -21,13 +22,13 @@ func SendEvent(u u.Unstructured, url string, priority string, secret corev1.Secr
 	var messageColour string
 	var emoji string
 	if priority == "high" {
-		emoji = ":large_red_circle: :large_red_circle: :large_red_circle:"
+		emoji = ":red_circle:"
 		messageColour = "#ff1100"
 	} else if priority == "medium" {
-		emoji = ":large_orange_circle: :large_orange_circle: :large_orange_circle:"
+		emoji = ":large_orange_circle:"
 		messageColour = "#ff6600"
 	} else {
-		emoji = ":large_yellow_circle: :large_yellow_circle: :large_yellow_circle:"
+		emoji = ":large_yellow_circle:"
 		messageColour = "#ffcc00"
 	}
 
@@ -44,12 +45,12 @@ func SendEvent(u u.Unstructured, url string, priority string, secret corev1.Secr
 	attachment := slackclient.Attachment{
 		Fields: []slackclient.AttachmentField{
 			{
-				Title: emoji + "Resource Change Notification" + emoji,
-				Value: u.GetName() + "/" + u.GetNamespace(),
+				Title: "Resource Conflict Detected",
+				Value: "",
 			},
 			{
-				Title: "Example Reason",
-				Value: "Resource was changed by Operator X",
+				Title: emoji + fmt.Sprintf("  Resource Priority: %s  ", priority) + emoji,
+				Value: fmt.Sprintf("A change to Resource %s/%s was blocked", u.GetNamespace(), u.GetName()),
 				Short: true,
 			},
 		},
