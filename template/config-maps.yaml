@@ -5,10 +5,9 @@ metadata:
   namespace: heimdall
 data:
   slack-channel: "default-heimdall-channel"
-  low-priority-cadence: "600s"
-  medium-priority-cadence: "300s"
-  high-priority-cadence: "60s"
-  resource-fetch-cadence: "10s"
+  low-priority-cadence: "30s"
+  medium-priority-cadence: "20s"
+  high-priority-cadence: "10s"
 ---
 apiVersion: v1
 kind: ConfigMap
