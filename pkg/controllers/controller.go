@@ -145,7 +145,7 @@ func (c *Controller) ResourceReconcile(ctx context.Context, resource *u.Unstruct
 	logrus.Infof("Reconciling %s with importance of %s", namespacedName(resource), resource.GetLabels()[priorityLabel])
 
 	logrus.Infof("Reconciling labels for %s", namespacedName(resource))
-	priority, err := ctr.ReconcileLabels(ctx, *resource)
+	priority, err := ctr.reconcileLabels(ctx, *resource)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -156,6 +156,7 @@ func (c *Controller) ResourceReconcile(ctx context.Context, resource *u.Unstruct
 			Name:      resource.GetName(),
 			Namespace: resource.GetNamespace(),
 			NodeName:  "",
+			Kind:      resource.GetKind(),
 		},
 	)
 	logrus.Infof("Notification URL created: %s", url)
@@ -222,7 +223,7 @@ func sendSlackNotification(resource *u.Unstructured, url string, priority string
 	return nil
 }
 
-func (c *Controller) ReconcileLabels(ctx context.Context, resource u.Unstructured) (string, error) {
+func (c *Controller) reconcileLabels(ctx context.Context, resource u.Unstructured) (string, error) {
 	gvr := helpers.GVRFromUnstructured(resource)
 
 	// If resource no longer has the label or if label is empty (no priority set) then delete it from the map
@@ -424,6 +425,13 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 					logrus.Errorf("Error reconciling resource status: %v", err)
 					continue
 				}
+
+				for _, item := range unstructuredItems {
+					if _, err = c.reconcileLabels(ctx, item); err != nil {
+						logrus.Errorf("Error reconciling resource label: %v", err)
+						continue
+					}
+				}
 			}
 		}
 	}()
@@ -466,7 +474,7 @@ func (c *Controller) reconcileResourceStatus(items []u.Unstructured) error {
 			logrus.Infof("Resource %s not found in map, adding it", itemName)
 
 			// First change the label to be the ip address
-			_, err := c.ReconcileLabels(context.TODO(), item)
+			_, err := c.reconcileLabels(context.TODO(), item)
 			if err != nil {
 				return err
 			}

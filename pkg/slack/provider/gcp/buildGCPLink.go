@@ -8,6 +8,7 @@ type ResourceInformation struct {
 	Name      string
 	Namespace string
 	NodeName  string
+	Kind      string
 }
 
 func BuildGCPLink(clusterURL string, resInfo ResourceInformation) string {

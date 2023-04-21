@@ -30,8 +30,7 @@ func getProviderID(clientset *kubernetes.Clientset) string {
 	return nodes.Items[0].Spec.ProviderID
 }
 
-func BuildNotificationURL(client kubernetes.Clientset, resourceInformation gcp2.ResourceInformation) string {
-	resourceInfo = resourceInformation // Set the resource information (node name will be blank)
+func BuildNotificationURL(client kubernetes.Clientset, resourceInfo gcp2.ResourceInformation) string {
 	provider := getProviderID(&client) // Get the provider ID (also sets the node name)
 	providerID := strings.Split(provider, ":")[0]
 
@@ -46,7 +45,7 @@ func BuildNotificationURL(client kubernetes.Clientset, resourceInformation gcp2.
 	case provider == openshift:
 		openshift2.BuildOpenshiftLink(provider, resourceInfo)
 	default:
-		link = "http://127.0.0.1:40307/api/v1/namespaces/" + resourceInfo.Namespace + "/services/http:kubernetes-dashboard:/proxy/#/pod/" + resourceInfo.Namespace + "/" + resourceInfo.Name + "?namespace=" + resourceInfo.Namespace
+		link = "http://127.0.0.1:40004/api/v1/namespaces/" + resourceInfo.Namespace + "/services/http:kubernetes-dashboard:/proxy/#/" + strings.ToLower(resourceInfo.Kind) + "/" + resourceInfo.Namespace + "/" + resourceInfo.Name + "?namespace=" + resourceInfo.Namespace
 	}
 
 	return link
