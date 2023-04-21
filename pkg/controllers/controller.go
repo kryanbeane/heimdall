@@ -73,10 +73,9 @@ var settingsMap = v1.ConfigMap{
 	},
 	Data: map[string]string{
 		"slack-channel":           "default-heimdall-channel",
-		"low-priority-cadence":    "600s",
-		"medium-priority-cadence": "300s",
-		"high-priority-cadence":   "60s",
-		"fetch-cadence":           "10s",
+		"low-priority-cadence":    "30s",
+		"medium-priority-cadence": "20s",
+		"high-priority-cadence":   "10s",
 	},
 }
 
