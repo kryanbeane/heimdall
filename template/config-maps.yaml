@@ -4,10 +4,10 @@ metadata:
   name: heimdall-settings
   namespace: heimdall
 data:
-  slack-channel: "default-heimdall-channel"
-  low-priority-cadence: "30s"
-  medium-priority-cadence: "20s"
-  high-priority-cadence: "10s"
+  slack-channel:
+  low-priority-cadence:
+  medium-priority-cadence:
+  high-priority-cadence:
 ---
 apiVersion: v1
 kind: ConfigMap
