@@ -419,7 +419,6 @@ func CreateGrafanaDashboard(grafanaURL string, apiKey APIKey, folderId int) erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusPreconditionFailed {
-		logrus.Infof("Grafana dashboard already exists, continuing...")
 		return nil
 	}
 
