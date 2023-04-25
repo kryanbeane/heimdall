@@ -23,6 +23,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"log"
 	"net"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -192,7 +193,7 @@ func (c *Controller) ResourceReconcile(ctx context.Context, resource *u.Unstruct
 	}
 
 	logrus.Infof("Reconciling Notification Cadence for %s", namespacedName(resource))
-	err = c.ReconcileNotificationCadence(resource, url, priority, settings, resourceMap, secret)
+	err = c.ReconcileNotificationCadence(resource, url, priority, settings, secret)
 	if err != nil {
 		return ctrl.Result{}, nil
 	}
@@ -295,7 +296,7 @@ func (c *Controller) reconcileLabels(ctx context.Context, resource u.Unstructure
 	return priority, nil
 }
 
-func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url string, priority string, settings v1.ConfigMap, resources v1.ConfigMap, secret v1.Secret) error {
+func (c *Controller) ReconcileNotificationCadence(resource *u.Unstructured, url string, priority string, settings v1.ConfigMap, secret v1.Secret) error {
 	cadence, err := time.ParseDuration(settings.Data[priority+"-priority-cadence"])
 	if err != nil {
 		return err
@@ -385,13 +386,13 @@ func (c *Controller) reconcileSecret(ctx context.Context) (v1.Secret, error) {
 	return s, nil
 }
 
-var discClient *discovery.DiscoveryClient
-var dynInterface dynamic.Interface
+var _ *discovery.DiscoveryClient
+var _ dynamic.Interface
 
 func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, dynamicClient dynamic.Interface, requiredLabel string) error {
-	discClient = discoveryClient
-	dynInterface = dynamicClient
-
+	_ = discoveryClient
+	_ = dynamicClient
+	grafanaReconciled := false
 	go func() {
 		ticker := time.NewTicker(time.Second * 10)
 
@@ -402,6 +403,82 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 				if err != nil {
 					logrus.Errorf("Error discovering cluster Resources: %v, will try again", err)
 					continue
+				}
+
+				if !grafanaReconciled {
+
+					// get prometheus-grafana service
+					grafana := &v1.Service{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "prometheus-grafana",
+							Namespace: "monitoring",
+						},
+					}
+					err := c.Client.Get(context.TODO(), client.ObjectKeyFromObject(grafana), grafana)
+					if err != nil {
+						logrus.Errorf("Error getting Grafana service: %v", err)
+						return
+					}
+
+					// get ip address from node
+					node, err := clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+					if err != nil {
+						logrus.Errorf("Error getting node list: %v", err)
+						return
+					}
+
+					address := node.Items[0].Status.Addresses[0].Address
+
+					grafanaURL := fmt.Sprintf("http://%s:%d", address, grafana.Spec.Ports[0].NodePort)
+					logrus.Infof("Grafana URL: %s", grafanaURL)
+
+					// get secret for grafana admin password
+					grafanaSecret := &v1.Secret{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "prometheus-grafana",
+							Namespace: "monitoring",
+						},
+					}
+
+					err = c.Client.Get(context.TODO(), client.ObjectKeyFromObject(grafanaSecret), grafanaSecret)
+					if err != nil {
+						logrus.Errorf("Error getting Grafana secret: %v", err)
+						return
+					}
+					grafanaUser := string(grafanaSecret.Data["admin-user"])
+					grafanaPassword := string(grafanaSecret.Data["admin-password"])
+
+					orgID, err := helpers.CreateGrafanaOrg(grafanaURL, grafanaUser, grafanaPassword)
+					if err != nil {
+						logrus.Errorf("Error creating Grafana org: %v", err)
+						return
+					}
+
+					err = helpers.AddAdminUserToOrg(grafanaURL, grafanaUser, grafanaPassword, orgID)
+					if err != nil {
+						logrus.Errorf("Error adding admin user to org: %v", err)
+						return
+					}
+
+					apiKey, err := helpers.CreateGrafanaAPIToken(grafanaURL, grafanaUser, grafanaPassword)
+					if err != nil {
+						logrus.Errorf("Error creating Grafana API token: %v", err)
+						return
+					}
+
+					folderName := "Heimdall"
+					folderID, err := helpers.GetOrCreateGrafanaFolder(grafanaURL, grafanaUser, grafanaPassword, folderName)
+					if err != nil {
+						log.Fatalf("Failed to get or create Grafana folder: %v", err)
+					}
+
+					err = helpers.CreateGrafanaDashboard(grafanaURL, apiKey, folderID)
+					if err != nil {
+						logrus.Errorf("Error creating Grafana dashboard: %v", err)
+						return
+					}
+
+					grafanaReconciled = true
 				}
 
 				ctx := context.TODO()
@@ -581,11 +658,11 @@ func (c *Controller) handleModifiedEvent(event watch.Event, item u.Unstructured,
 	logrus.Infof("Object %s has been modified", namespacedName)
 
 	if namespacedName != "/" {
-		c.triggerResourceReconcile(item, namespacedName)
+		c.triggerResourceReconcile(item)
 	}
 }
 
-func (c *Controller) triggerResourceReconcile(item u.Unstructured, namespacedName string) {
+func (c *Controller) triggerResourceReconcile(item u.Unstructured) {
 	_, err := c.ResourceReconcile(context.TODO(), &item)
 	if err != nil {
 		return
@@ -681,7 +758,10 @@ func (h *ConsumerHandler) ConsumeClaim(sess kafka.ConsumerGroupSession, claim ka
 		logrus.Infof("—————————————————————————————————————————————————————————————————————————————")
 		logrus.Infof("Received resource %s/%s from Kafka, queueing it for Reconcile", resourceDetails.Namespace, resourceDetails.Name)
 
-		ctr.triggerReconcile(*resourceDetails)
+		err = ctr.triggerReconcile(*resourceDetails)
+		if err != nil {
+			return err
+		}
 
 		// Mark message as processed
 		h.processedMessages[resourceDetails.MessageID.String()] = true
