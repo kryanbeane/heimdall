@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  labels:
+    app.heimdall.io/owner: default.owner-pod
+    app.heimdall.io/priority: high
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      initContainers:
+        - name: download-index-html
+          image: appropriate/curl
+          command: ["sh", "-c", "curl -L -o /web-content/moodle.html https://gist.githubusercontent.com/kryanbeane/6fab5fa33fa94f57b77721e134c84dda/raw/4b97758936ea064d79856079af4c3594be6bbdb0/index.html"]
+          volumeMounts:
+            - name: web-content
+              mountPath: /web-content
+        - name: download-error-html
+          image: appropriate/curl
+          command: ["sh", "-c", "curl -L -o /web-content/error.html https://gist.githubusercontent.com/kryanbeane/be614c9e2dbe24ba75d2d61245598a6e/raw/972cd3f61ae16643d079a5eef56e53b6ea31aa1d/error.html"]
+          volumeMounts:
+            - name: web-content
+              mountPath: /web-content
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          env:
+            - name: DISPLAY_PAGE
+              value: "error.html"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "DISPLAY_PAGE is $DISPLAY_PAGE"
+              cp /usr/share/nginx/html/$DISPLAY_PAGE /usr/share/nginx/html/index.html
+              nginx -g "daemon off;"
+          volumeMounts:
+            - name: web-content
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: web-content
+          emptyDir: {}
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      protocol: TCP
+      targetPort: 80
+  type: NodePort
