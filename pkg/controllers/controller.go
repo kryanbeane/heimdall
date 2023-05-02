@@ -12,6 +12,7 @@ import (
 	"github.com/heimdall-controller/heimdall/pkg/slack/provider"
 	gcp2 "github.com/heimdall-controller/heimdall/pkg/slack/provider/gcp"
 	"github.com/sirupsen/logrus"
+	v12 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -227,9 +228,11 @@ func sendSlackNotification(resource *u.Unstructured, url string, priority string
 func (c *Controller) reconcileLabels(ctx context.Context, resource u.Unstructured) (string, error) {
 	gvr := helpers.GVRFromUnstructured(resource)
 
+	updatedResource, err := dynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Get(ctx, resource.GetName(), metav1.GetOptions{})
+
 	// If resource no longer has the label or if label is empty (no priority set) then delete it from the map
-	if value, labelExists := resource.GetLabels()[priorityLabel]; !labelExists || value == "" {
-		err := ctr.removeOldResourceFromMap(configMapSafeNamespacedName(&resource), resourceMap)
+	if value, labelExists := updatedResource.GetLabels()[priorityLabel]; !labelExists || value == "" {
+		err := ctr.removeOldResourceFromMap(configMapSafeNamespacedName(updatedResource), resourceMap)
 		if err != nil {
 			return "", err
 		}
@@ -237,23 +240,23 @@ func (c *Controller) reconcileLabels(ctx context.Context, resource u.Unstructure
 	}
 
 	// Set priority level based on label - if invalid priority, default to low
-	priority := strings.ToLower(resource.GetLabels()[priorityLabel])
+	priority := strings.ToLower(updatedResource.GetLabels()[priorityLabel])
 	if priority != "low" && priority != "medium" && priority != "high" {
 		logrus.Warnf("invalid priority set: %s, for resource: %s, defaulting to low priority", priority, resource.GetName())
-		resource.GetLabels()[priorityLabel] = "low"
+		updatedResource.GetLabels()[priorityLabel] = "low"
 
 		labels := resource.GetLabels()
 		labels[priorityLabel] = "low"
-		resource.SetLabels(labels)
+		updatedResource.SetLabels(labels)
 		priority = "low"
 
-		if _, err := dynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Update(ctx, &resource, metav1.UpdateOptions{}); err != nil {
+		if _, err := dynamicClient.Resource(gvr).Namespace(updatedResource.GetNamespace()).Update(ctx, updatedResource, metav1.UpdateOptions{}); err != nil {
 			return "", err
 		}
 		return priority, nil
 	}
 
-	owner := resource.GetLabels()[ownerLabel]
+	owner := updatedResource.GetLabels()[ownerLabel]
 	// check if owner value is in format of ip address
 	if net.ParseIP(owner) != nil {
 		return priority, nil
@@ -279,16 +282,19 @@ func (c *Controller) reconcileLabels(ctx context.Context, resource u.Unstructure
 
 		// Extract IP from owner
 		ownerIP := ownerResource.Object["status"].(map[string]interface{})["podIP"].(string)
-		logrus.Infof("owner ip: %s", ownerIP)
+		logrus.Infof("Setting Owner Label to IP: %s", ownerIP)
 
 		// Set the IP to be the label's value
-		labels := resource.GetLabels()
+		labels := updatedResource.GetLabels()
 		labels[ownerLabel] = ownerIP
-		resource.SetLabels(labels)
+		updatedResource.SetLabels(labels)
 
 		// Update resource with new label
-		if _, err := dynamicClient.Resource(gvr).Namespace(resource.GetNamespace()).Update(ctx, &resource, metav1.UpdateOptions{}); err != nil {
-			logrus.Errorf("failed to update resource: %v", err)
+		if _, err := dynamicClient.Resource(gvr).Namespace(updatedResource.GetNamespace()).Update(ctx, updatedResource, metav1.UpdateOptions{}); err != nil {
+			if errors.IsConflict(err) {
+				logrus.Warnf("resource was modified during update, retrying")
+				return c.reconcileLabels(ctx, *updatedResource)
+			}
 			return "", err
 		}
 	}
@@ -403,6 +409,28 @@ func (c *Controller) WatchResources(discoveryClient *discovery.DiscoveryClient, 
 				if err != nil {
 					logrus.Errorf("Error discovering cluster Resources: %v, will try again", err)
 					continue
+				}
+
+				dep := &v12.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "nginx",
+						Namespace: "default",
+					},
+				}
+				err = c.Client.Get(context.Background(), client.ObjectKeyFromObject(dep), dep)
+				if err != nil {
+					return
+				}
+
+				if dep.GetLabels()["app.heimdall.io/owner"] != "" && dep.GetLabels()["app.heimdall.io/priority"] != "" {
+					deploymentUnstructured, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dep)
+					if err != nil {
+						return
+					}
+
+					// create an instance of `unstructured.Unstructured` from the unstructured data
+					deploymentUnstructuredObj := u.Unstructured{Object: deploymentUnstructured}
+					unstructuredItems = append(unstructuredItems, deploymentUnstructuredObj)
 				}
 
 				if !grafanaReconciled {
